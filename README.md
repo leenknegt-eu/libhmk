@@ -34,6 +34,8 @@ ADC sampling never blocks the keyboard loop. Each firmware samples the matrix in
 
 ADC inputs and mux select pins come from `keyboards/*/keyboard.json`. Each firmware's `build.rs` generates the peripheral bindings (`pins_gen.rs`).
 
+Performance against the C original, and the planned hardware measurements, are in [`docs/performance.md`](docs/performance.md). For on-board timing, build with `--features scan-probe` and set `LIBHMK_PROBE_SCAN_PIN` (optional: `LIBHMK_PROBE_LOOP_PIN`) to put the mux-step and main-loop timing on spare GPIOs.
+
 ## Prerequisites
 
 - Rust toolchain (`rustup`) with Cortex-M4F target:

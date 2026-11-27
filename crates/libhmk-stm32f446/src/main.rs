@@ -6,6 +6,7 @@
 mod analog;
 mod board;
 mod flash;
+mod probe;
 mod usb;
 
 pub mod kb {
@@ -41,6 +42,7 @@ use static_cell::StaticCell;
 use crate::analog::{run_scanner, MuxInputs, RawInputs, SelectPins, SequenceAdc, SharedAnalogSamples};
 use crate::board::Stm32Board;
 use crate::flash::Stm32Flash;
+use crate::probe::Probe;
 use crate::usb::{usb_task, USB_CMD_RX, USB_HID_TX, USB_RAW_TX};
 
 bind_interrupts!(struct Irqs {
@@ -59,8 +61,8 @@ unsafe fn UART5() {
 }
 
 #[embassy_executor::task]
-async fn adc_task(adc: SequenceAdc, select: SelectPins) -> ! {
-    run_scanner(adc, select, &SAMPLES).await
+async fn adc_task(adc: SequenceAdc, select: SelectPins, probe: Probe) -> ! {
+    run_scanner(adc, select, probe, &SAMPLES).await
 }
 
 #[embassy_executor::main]
@@ -173,9 +175,15 @@ async fn main(spawner: Spawner) {
             adc_mux_select_pins!(p);
         pins.map(|pin| Output::new(pin, Level::Low, Speed::VeryHigh))
     };
+    // Optional timing probes (`scan-probe` feature, see docs/performance.md)
+    #[cfg(feature = "scan-probe")]
+    let (scan_probe, mut loop_probe) = (Probe::new(probe_scan_pin!(p)), Probe::new(probe_loop_pin!(p)));
+    #[cfg(not(feature = "scan-probe"))]
+    let (scan_probe, mut loop_probe) = (Probe::disabled(), Probe::disabled());
+
     interrupt::UART5.set_priority(Priority::P6);
     let adc_spawner = EXECUTOR_ADC.start(interrupt::UART5);
-    adc_spawner.spawn(unwrap!(adc_task(adc, select)));
+    adc_spawner.spawn(unwrap!(adc_task(adc, select, scan_probe)));
 
     // Wait for one complete matrix pass before calibrating
     while SAMPLES.generation() == 0 {
@@ -202,6 +210,7 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        loop_probe.toggle();
         let out = fw.step(&SAMPLES, &mut flash, &mut board, &mut ble);
         if !out.hid.is_empty() {
             let _ = USB_HID_TX.try_send(out.hid);

@@ -60,6 +60,7 @@ const GPIO_STRIDE: usize = 0x400;
 const GPIO_CFGR: usize = 0x00;
 const GPIO_ODRVR: usize = 0x08;
 const GPIO_PULL: usize = 0x0C;
+const GPIO_ODT: usize = 0x14;
 const GPIO_SCR: usize = 0x18;
 
 pub struct SharedAnalogSamples {
@@ -118,6 +119,24 @@ unsafe fn gpio_modify_2bit(port: u8, offset: usize, pin: u8, value: u32) {
     reg.write_volatile(v);
 }
 
+/// Drive a timing probe pin (`scan-probe` feature; `None` compiles to nothing).
+#[inline(always)]
+fn probe_set(gpio: Option<(u8, u8)>, high: bool) {
+    if let Some((port, pin)) = gpio {
+        let mask = 1u32 << pin;
+        unsafe { gpio_reg(port, GPIO_SCR).write_volatile(if high { mask } else { mask << 16 }) };
+    }
+}
+
+/// Toggle the main-loop probe pin (`LIBHMK_PROBE_LOOP_PIN`), once per main-loop iteration.
+#[inline(always)]
+pub fn probe_loop_toggle() {
+    if let Some((port, pin)) = PROBE_LOOP_GPIO {
+        let high = unsafe { gpio_reg(port, GPIO_ODT).read_volatile() } & (1 << pin) == 0;
+        probe_set(PROBE_LOOP_GPIO, high);
+    }
+}
+
 /// Drive the multiplexer select pins for `channel`.
 #[inline]
 fn set_mux_channel(channel: u32) {
@@ -144,7 +163,14 @@ fn tmr6() -> &'static at32f4xx_pac::at32f405::tmr6::RegisterBlock {
 pub fn init(crm: &CRM) {
     unsafe {
         crm.ahben1()
-            .modify(|_, w| w.gpioa().set_bit().gpiob().set_bit().gpioc().set_bit().dma1().set_bit());
+            .modify(|_, w| {
+                w.gpioa().set_bit();
+                w.gpiob().set_bit();
+                w.gpioc().set_bit();
+                w.gpiod().set_bit();
+                w.gpiof().set_bit();
+                w.dma1().set_bit()
+            });
         crm.apb2en().modify(|_, w| w.adc1().set_bit());
         crm.apb1en().modify(|_, w| w.tmr6().set_bit());
 
@@ -156,6 +182,14 @@ pub fn init(crm: &CRM) {
         // Mux select outputs (mode 0b01, push-pull, stronger drive), start at channel 0
         set_mux_channel(0);
         for &(port, pin) in MUX_SELECT_GPIO.iter() {
+            gpio_modify_2bit(port, GPIO_CFGR, pin, 0b01);
+            gpio_modify_2bit(port, GPIO_ODRVR, pin, 0b01);
+            gpio_modify_2bit(port, GPIO_PULL, pin, 0b00);
+        }
+
+        // Timing probes: push-pull outputs, start low
+        for &(port, pin) in PROBE_SCAN_GPIO.iter().chain(PROBE_LOOP_GPIO.iter()) {
+            gpio_reg(port, GPIO_SCR).write_volatile(1 << (pin + 16));
             gpio_modify_2bit(port, GPIO_CFGR, pin, 0b01);
             gpio_modify_2bit(port, GPIO_ODRVR, pin, 0b01);
             gpio_modify_2bit(port, GPIO_PULL, pin, 0b00);
@@ -228,6 +262,7 @@ pub fn init(crm: &CRM) {
         while a.ctrl2().read().bits() & CTRL2_ADCAL != 0 {}
 
         ch.ctrl().modify(|r, w| w.bits(r.bits() | DMA_CHEN));
+        probe_set(PROBE_SCAN_GPIO, true);
         if NUM_SELECT_PINS > 0 {
             // First conversion after the multiplexer has settled on channel 0
             t.ctrl1().write(|w| w.bits(TMR_EN));
@@ -256,6 +291,8 @@ fn DMA1_CHANNEL1() {
     for (&key, &val) in kb::ADC_RAW_INPUT_VECTOR.iter().zip(buf[NUM_MUX_INPUTS..].iter()) {
         SAMPLES.store_key(key, val);
     }
+    // Probe: low once this step's samples are stored, high again at the next mux switch.
+    probe_set(PROBE_SCAN_GPIO, false);
 
     if NUM_SELECT_PINS > 0 {
         let next = (mux_ch + 1) & ((1 << NUM_SELECT_PINS) - 1);
@@ -264,10 +301,12 @@ fn DMA1_CHANNEL1() {
             SAMPLES.generation.fetch_add(1, Ordering::Release);
         }
         set_mux_channel(next);
+        probe_set(PROBE_SCAN_GPIO, true);
         // Settle delay, then TMR6 starts the next conversion
         unsafe { tmr6().ctrl1().write(|w| w.bits(TMR_EN)) };
     } else {
         SAMPLES.generation.fetch_add(1, Ordering::Release);
+        probe_set(PROBE_SCAN_GPIO, true);
         unsafe { adc().ctrl2().modify(|r, w| w.bits(r.bits() | CTRL2_OCSWTRG)) };
     }
 }

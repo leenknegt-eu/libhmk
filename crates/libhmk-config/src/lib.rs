@@ -147,6 +147,15 @@ pub struct KeyboardActuation {
     pub actuation_point: u8,
 }
 
+/// Optional GPIO probe pins for on-hardware timing measurements (`scan-probe` feature).
+#[derive(Debug, Clone, Default)]
+pub struct ProbePins {
+    /// High when the mux select lines change, low once that step's samples are stored.
+    pub scan: Option<String>,
+    /// Toggles once per main-loop iteration.
+    pub main_loop: Option<String>,
+}
+
 /// ADC pin names (as written in the driver's `input_pins` table) used by a keyboard.
 #[derive(Debug, Clone, Default)]
 pub struct AdcPins {
@@ -324,6 +333,59 @@ impl KeyboardConfig {
             None => None,
         };
         Ok(AdcPins { mux_select, mux_input, raw_input, battery })
+    }
+
+    /// Read and validate probe pins from `LIBHMK_PROBE_SCAN_PIN` / `LIBHMK_PROBE_LOOP_PIN`.
+    ///
+    /// Pins use `keyboard.json` naming (`B5`, `P0.26`) and must not be used by the keyboard's
+    /// analog/mux configuration or be reserved by the MCU driver.
+    pub fn probe_pins_from_env(&self) -> Result<ProbePins, String> {
+        let driver = self.driver()?;
+        let pins = self.adc_pins()?;
+        let used: Vec<&str> = pins
+            .mux_select
+            .iter()
+            .chain(pins.mux_input.iter())
+            .chain(pins.raw_input.iter())
+            .chain(pins.battery.iter())
+            .map(|s| s.as_str())
+            .collect();
+        let check = |var: &str| -> Result<Option<String>, String> {
+            let Ok(pin) = std::env::var(var) else {
+                return Ok(None);
+            };
+            let pin = pin.trim().to_string();
+            let valid = if driver.name == "nrf52840xx" {
+                pin.len() == 5
+                    && (pin.starts_with("P0.") || pin.starts_with("P1."))
+                    && pin[3..].parse::<u8>().is_ok_and(|n| {
+                        n < if pin.starts_with("P0.") { 32 } else { 16 }
+                    })
+            } else {
+                // Port letter + pin number 0..=15 without leading zeros ("B5", "C13")
+                let (port, num) = pin.split_at(pin.len().min(1));
+                matches!(port, "A" | "B" | "C" | "D" | "F")
+                    && num.parse::<u8>().is_ok_and(|n| n < 16 && num == n.to_string())
+            };
+            if !valid {
+                return Err(format!("{var}: invalid pin name '{pin}' for {}", driver.name));
+            }
+            if used.contains(&pin.as_str()) {
+                return Err(format!("{var}: pin '{pin}' is used by the keyboard's analog/mux setup"));
+            }
+            if driver.reserved_pins.contains(&pin.as_str()) {
+                return Err(format!("{var}: pin '{pin}' is reserved on {}", driver.name));
+            }
+            Ok(Some(pin))
+        };
+        let probe = ProbePins {
+            scan: check("LIBHMK_PROBE_SCAN_PIN")?,
+            main_loop: check("LIBHMK_PROBE_LOOP_PIN")?,
+        };
+        if probe.scan.is_some() && probe.scan == probe.main_loop {
+            return Err("LIBHMK_PROBE_SCAN_PIN and LIBHMK_PROBE_LOOP_PIN must differ".into());
+        }
+        Ok(probe)
     }
 
     /// Build gzip-compressed JSON metadata compatible with `hmkconf`.
@@ -789,5 +851,39 @@ mod tests {
                 .unwrap_or_else(|e| panic!("memory.x failed for {kb}: {e}"));
             assert!(mem_x.contains("FLASH_WL"));
         }
+    }
+
+    #[test]
+    fn probe_pin_validation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../keyboards");
+        let he60 = KeyboardConfig::from_file(&root.join("he60/keyboard.json")).unwrap();
+        let nrf = KeyboardConfig::from_file(&root.join("nrf52840-dk-he16/keyboard.json")).unwrap();
+        // Single test touching these variables, so no cross-test races.
+        let run = |cfg: &KeyboardConfig, scan: Option<&str>, lp: Option<&str>| {
+            match scan {
+                Some(v) => std::env::set_var("LIBHMK_PROBE_SCAN_PIN", v),
+                None => std::env::remove_var("LIBHMK_PROBE_SCAN_PIN"),
+            }
+            match lp {
+                Some(v) => std::env::set_var("LIBHMK_PROBE_LOOP_PIN", v),
+                None => std::env::remove_var("LIBHMK_PROBE_LOOP_PIN"),
+            }
+            cfg.probe_pins_from_env()
+        };
+        let ok = run(&he60, Some("B5"), Some("B6")).unwrap();
+        assert_eq!((ok.scan.as_deref(), ok.main_loop.as_deref()), (Some("B5"), Some("B6")));
+        assert!(run(&he60, None, None).unwrap().scan.is_none());
+        assert!(run(&he60, Some("A0"), None).is_err(), "ADC input pin");
+        assert!(run(&he60, Some("C13"), None).is_err(), "mux select pin");
+        assert!(run(&he60, Some("A12"), None).is_err(), "USB pin");
+        assert!(run(&he60, Some("B05"), None).is_err(), "leading zero");
+        assert!(run(&he60, Some("G1"), None).is_err(), "no such port");
+        assert!(run(&he60, Some("B5"), Some("B5")).is_err(), "same pin twice");
+        assert!(run(&nrf, Some("P0.26"), None).is_ok());
+        assert!(run(&nrf, Some("P0.02"), None).is_err(), "SAADC input");
+        assert!(run(&nrf, Some("P1.16"), None).is_err(), "P1 has 16 pins");
+        assert!(run(&nrf, Some("B5"), None).is_err(), "wrong naming");
+        std::env::remove_var("LIBHMK_PROBE_SCAN_PIN");
+        std::env::remove_var("LIBHMK_PROBE_LOOP_PIN");
     }
 }

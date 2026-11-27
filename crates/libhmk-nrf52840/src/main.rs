@@ -8,6 +8,7 @@ mod analog;
 mod ble;
 mod board;
 mod flash;
+mod probe;
 mod usb;
 
 pub mod kb {
@@ -41,6 +42,7 @@ use crate::analog::{make_select_output, run_scanner, AdcInputs, SettleTimer, Sha
 use crate::ble::{run_ble, NrfBleController, BLE_HID_TX, BLE_RAW_TX};
 use crate::board::NrfBoard;
 use crate::flash::NrfFlash;
+use crate::probe::Probe;
 use crate::usb::{usb_task, CMD_RX, USB_HID_TX, USB_RAW_TX};
 
 bind_interrupts!(pub struct Irqs {
@@ -90,8 +92,9 @@ async fn saadc_task(
     inputs: AdcInputs,
     select_pins: [embassy_nrf::gpio::Output<'static>; kb::ADC_MUX_SELECT_PINS.len()],
     settle_timer: SettleTimer,
+    probe: Probe,
 ) -> ! {
-    run_scanner(saadc, inputs, select_pins, settle_timer, &SAMPLES).await
+    run_scanner(saadc, inputs, select_pins, settle_timer, probe, &SAMPLES).await
 }
 
 #[embassy_executor::task]
@@ -176,11 +179,17 @@ async fn main(spawner: Spawner) {
     let select_pins: [embassy_nrf::Peri<'static, embassy_nrf::gpio::AnyPin>; kb::ADC_MUX_SELECT_PINS.len()] =
         adc_mux_select_pins!(p);
     let settle_timer = SettleTimer::new(p.TIMER1);
+    // Optional timing probes (`scan-probe` feature, see docs/performance.md)
+    #[cfg(feature = "scan-probe")]
+    let (scan_probe, mut loop_probe) = (Probe::new(probe_scan_pin!(p)), Probe::new(probe_loop_pin!(p)));
+    #[cfg(not(feature = "scan-probe"))]
+    let (scan_probe, mut loop_probe) = (Probe::disabled(), Probe::disabled());
     spawner.spawn(unwrap!(saadc_task(
         p.SAADC,
         inputs,
         select_pins.map(make_select_output),
-        settle_timer
+        settle_timer,
+        scan_probe
     )));
 
     // 5. Initialize libhmk-core Firmware engine
@@ -272,6 +281,7 @@ async fn main(spawner: Spawner) {
         }
 
         // Run Hall-effect matrix scan + layout + advanced keys
+        loop_probe.toggle();
         let out = fw.step(&SAMPLES, &mut flash, &mut board, &mut ble_ctrl);
         if !out.hid.is_empty() {
             if ble_ctrl.is_usb_active() {

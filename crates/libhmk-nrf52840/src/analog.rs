@@ -21,6 +21,7 @@ use embassy_time::{Duration, Instant, Timer};
 use libhmk_core::traits::AnalogInput;
 
 use crate::kb;
+use crate::probe::Probe;
 
 /// Signalled after every complete matrix pass (wakes the main loop on battery power).
 pub static SCAN_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -224,6 +225,9 @@ async fn measure_battery_mv(
 
 /// Continuously scan the multiplexed and raw SAADC inputs into `samples`.
 ///
+/// `probe` (feature `scan-probe`) goes high when the select lines change and low once the
+/// step's samples are stored: period = time per mux step, high time = settle + conversion.
+///
 /// The battery voltage is sampled every [`BATTERY_INTERVAL`] with its own SAADC
 /// configuration, so the per-mux-step sequence only contains matrix channels.
 pub async fn run_scanner(
@@ -231,6 +235,7 @@ pub async fn run_scanner(
     mut inputs: AdcInputs,
     mut select_pins: [Output<'static>; kb::ADC_MUX_SELECT_PINS.len()],
     mut settle_timer: SettleTimer,
+    mut probe: Probe,
     samples: &'static SharedAnalogSamples,
 ) -> ! {
     let settle = Duration::from_micros(kb::ADC_SAMPLE_DELAY_US as u64);
@@ -255,18 +260,24 @@ pub async fn run_scanner(
                         pin.set_low();
                     }
                 }
+                probe.high();
                 settle_timer.delay_us(kb::ADC_SAMPLE_DELAY_US).await;
                 saadc.sample(&mut buf).await;
                 for (&key, &val) in keys.iter().zip(buf.iter()) {
                     samples.store_key(key, val);
                 }
+                probe.low();
             }
 
             if kb::ADC_MUX_NUM_CHANNELS == 0 {
+                probe.high();
                 saadc.sample(&mut buf).await;
             }
             for (&key, &val) in kb::ADC_RAW_INPUT_VECTOR.iter().zip(buf[num_mux_inputs..].iter()) {
                 samples.store_key(key, val);
+            }
+            if kb::ADC_MUX_NUM_CHANNELS == 0 {
+                probe.low();
             }
 
             samples.generation.fetch_add(1, Ordering::Release);

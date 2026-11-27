@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Embassy-STM32 Hall-effect keyboard firmware for STM32F446xx"
 
+[features]
+default = []
+# GPIO timing probes for on-hardware measurements (see docs/performance.md).
+# Requires LIBHMK_PROBE_SCAN_PIN (and optionally LIBHMK_PROBE_LOOP_PIN) at build time.
+scan-probe = []
+
 [build-dependencies]
 libhmk-config = { workspace = true }
 

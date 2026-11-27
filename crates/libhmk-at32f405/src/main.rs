@@ -132,6 +132,7 @@ async fn main(spawner: Spawner) {
             }
         }
 
+        analog::probe_loop_toggle();
         let out = fw.step(&SAMPLES, &mut flash, &mut board, &mut ble);
         if !out.hid.is_empty() {
             let _ = USB_HID_TX.try_send(out.hid);

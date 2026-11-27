@@ -82,6 +82,9 @@ pub struct DriverMetadata {
     pub bootloader: BootloaderMetadata,
     pub flash: FlashMetadata,
     pub adc: AdcMetadata,
+    /// Pins that must never be repurposed (USB, SWD, crystals, reset), as written in
+    /// `keyboard.json` pin names.
+    pub reserved_pins: &'static [&'static str],
 }
 
 pub const STM32F446XX: DriverMetadata = DriverMetadata {
@@ -115,6 +118,7 @@ pub const STM32F446XX: DriverMetadata = DriverMetadata {
             "C4", "C5",
         ],
     },
+    reserved_pins: &["A11", "A12", "A13", "A14"],
 };
 
 pub const AT32F405XX: DriverMetadata = DriverMetadata {
@@ -140,6 +144,7 @@ pub const AT32F405XX: DriverMetadata = DriverMetadata {
             "C4", "C5",
         ],
     },
+    reserved_pins: &["A11", "A12", "A13", "A14", "B14", "B15"],
 };
 
 pub const NRF52840XX: DriverMetadata = DriverMetadata {
@@ -165,6 +170,7 @@ pub const NRF52840XX: DriverMetadata = DriverMetadata {
             "P0.02", "P0.03", "P0.04", "P0.05", "P0.28", "P0.29", "P0.30", "P0.31",
         ],
     },
+    reserved_pins: &["P0.00", "P0.01", "P0.18"],
 };
 
 pub fn driver_by_name(name: &str) -> Result<&'static DriverMetadata, String> {

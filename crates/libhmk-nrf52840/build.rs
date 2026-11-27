@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use libhmk_config::KeyboardConfig;
 
+const PROBE_EXAMPLE: &str = "P0.26";
+
 fn main() {
     let keyboard = env::var("LIBHMK_KEYBOARD").unwrap_or_else(|_| "nrf52840-dk-he16".to_string());
     println!("cargo:rerun-if-env-changed=LIBHMK_KEYBOARD");
@@ -83,6 +85,36 @@ fn main() {
         gen.push_str(&format!("$p.{}.into(), ", periph(n)));
     }
     gen.push_str("] }; }\n");
+
+    // Optional GPIO timing probes (`scan-probe` feature), see docs/performance.md
+    println!("cargo:rerun-if-env-changed=LIBHMK_PROBE_SCAN_PIN");
+    println!("cargo:rerun-if-env-changed=LIBHMK_PROBE_LOOP_PIN");
+    let probe = if env::var_os("CARGO_FEATURE_SCAN_PROBE").is_some() {
+        let probe = cfg.probe_pins_from_env().expect("Invalid probe pin");
+        assert!(
+            probe.scan.is_some(),
+            "feature `scan-probe` requires LIBHMK_PROBE_SCAN_PIN (e.g. {})",
+            PROBE_EXAMPLE
+        );
+        probe
+    } else {
+        if env::var_os("LIBHMK_PROBE_SCAN_PIN").is_some() {
+            println!("cargo:warning=LIBHMK_PROBE_SCAN_PIN is ignored without `--features scan-probe`");
+        }
+        libhmk_config::ProbePins::default()
+    };
+    if env::var_os("CARGO_FEATURE_SCAN_PROBE").is_some() {
+        let pin = |p: &Option<String>| match p {
+            Some(n) => format!("Some($p.{}.into())", n.replace('.', "_")),
+            None => "None".to_string(),
+        };
+        gen.push_str(&format!(
+            "macro_rules! probe_scan_pin {{ ($p:ident) => {{ {} }}; }}\n\
+             macro_rules! probe_loop_pin {{ ($p:ident) => {{ {} }}; }}\n",
+            pin(&probe.scan),
+            pin(&probe.main_loop)
+        ));
+    }
     fs::write(out_dir.join("pins_gen.rs"), gen).expect("Failed to write pins_gen.rs");
 
     println!("cargo:rustc-link-search={}", out_dir.display());

@@ -108,6 +108,13 @@ jobs:
             dist/firmware.bin
             dist/firmware.elf
 
+      - name: Build ${{ matrix.keyboard }} with scan-probe instrumentation
+        env:
+          LIBHMK_KEYBOARD: ${{ matrix.keyboard }}
+          LIBHMK_PROBE_SCAN_PIN: ${{ matrix.crate == 'libhmk-nrf52840' && 'P0.26' || 'B5' }}
+          LIBHMK_PROBE_LOOP_PIN: ${{ matrix.crate == 'libhmk-nrf52840' && 'P0.27' || 'B6' }}
+        run: cargo build --locked --release -p ${{ matrix.crate }} --features scan-probe --target thumbv7em-none-eabihf
+
   release:
     name: Create Release Draft
     if: github.ref_type == 'tag'

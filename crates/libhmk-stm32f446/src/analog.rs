@@ -16,6 +16,7 @@ use embassy_time::{Duration, Timer};
 use libhmk_core::traits::AnalogInput;
 
 use crate::kb;
+use crate::probe::Probe;
 
 /// Sample time per conversion (C firmware default: `ADC_SAMPLETIME_3CYCLES`).
 const SAMPLE_TIME: SampleTime = SampleTime::CYCLES3;
@@ -151,9 +152,13 @@ impl SequenceAdc {
 }
 
 /// Continuously sample every multiplexer channel and raw input into `samples`.
+///
+/// `probe` (feature `scan-probe`) goes high when the select lines change and low once the
+/// step's samples are stored: period = time per mux step, high time = settle + conversion.
 pub async fn run_scanner(
     mut adc: SequenceAdc,
     mut select: SelectPins,
+    mut probe: Probe,
     samples: &'static SharedAnalogSamples,
 ) -> ! {
     let settle = Duration::from_micros(kb::ADC_SAMPLE_DELAY_US as u64);
@@ -167,19 +172,25 @@ pub async fn run_scanner(
                     pin.set_low();
                 }
             }
+            probe.high();
             // Yield while the multiplexer output settles instead of busy-waiting.
             Timer::after(settle).await;
             adc.sample(&mut buf).await;
             for (&key, &val) in keys.iter().zip(buf.iter()) {
                 samples.store_key(key, val);
             }
+            probe.low();
         }
 
         if kb::ADC_MUX_NUM_CHANNELS == 0 {
+            probe.high();
             adc.sample(&mut buf).await;
         }
         for (&key, &val) in kb::ADC_RAW_INPUT_VECTOR.iter().zip(buf[NUM_MUX_INPUTS..].iter()) {
             samples.store_key(key, val);
+        }
+        if kb::ADC_MUX_NUM_CHANNELS == 0 {
+            probe.low();
         }
 
         samples.generation.fetch_add(1, Ordering::Release);
