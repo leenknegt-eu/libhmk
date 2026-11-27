@@ -23,5 +23,5 @@ embassy-executor = { workspace = true, features = ["platform-cortex-m", "executo
 embassy-futures = { workspace = true }
 embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-stm32 = { workspace = true, features = ["defmt", "stm32f446re", "time-driver-any", "exti", "rt"] }
+embassy-stm32 = { workspace = true, features = ["defmt", "stm32f446re", "time-driver-any", "exti", "rt", "unstable-pac"] }
 embassy-usb = { workspace = true, features = ["defmt"] }

@@ -28,9 +28,9 @@ ADC sampling never blocks the keyboard loop. Each firmware samples the matrix in
 
 | MCU | Sampling | Main loop |
 | --- | --- | --- |
-| STM32F446 | Scanner task on a high-priority `InterruptExecutor`: mux settle via `Timer` (yields), short blocking conversions | free-running, `yield_now()` between iterations |
+| STM32F446 | Scanner task on a high-priority `InterruptExecutor`: mux settle via `Timer` (yields), then one ADC scan sequence over all inputs read by DMA2 (ADC stays powered) | free-running, `yield_now()` between iterations |
 | AT32F405 | Interrupt driven, as in the C firmware: ADC sequence → DMA1 full-transfer IRQ (store, advance mux) → TMR6 settle delay → next conversion | free-running, `yield_now()` between iterations |
-| nRF52840 | Async SAADC task (3 µs acquisition); battery measured every 10 s with its own channel config | free-running on USB power; on battery sleeps until the next scan pass (Active/Idle/Sleep throttling) |
+| nRF52840 | Async SAADC task (3 µs acquisition), mux settle timed by TIMER1 at 1 MHz (the RTC time base only has 30.5 µs ticks); battery measured every 10 s with its own channel config | free-running on USB power; on battery sleeps until the next scan pass (Active/Idle/Sleep throttling) |
 
 ADC inputs and mux select pins come from `keyboards/*/keyboard.json`. Each firmware's `build.rs` generates the peripheral bindings (`pins_gen.rs`).
 

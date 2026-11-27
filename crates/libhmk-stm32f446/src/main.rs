@@ -38,13 +38,14 @@ use libhmk_core::Firmware;
 use panic_probe as _;
 use static_cell::StaticCell;
 
-use crate::analog::{run_scanner, MuxInputs, RawInputs, SelectPins, SharedAnalogSamples};
+use crate::analog::{run_scanner, MuxInputs, RawInputs, SelectPins, SequenceAdc, SharedAnalogSamples};
 use crate::board::Stm32Board;
 use crate::flash::Stm32Flash;
 use crate::usb::{usb_task, USB_CMD_RX, USB_HID_TX, USB_RAW_TX};
 
 bind_interrupts!(struct Irqs {
     OTG_FS => stm32_usb::InterruptHandler<peripherals::USB_OTG_FS>;
+    DMA2_STREAM0 => embassy_stm32::dma::InterruptHandler<peripherals::DMA2_CH0>;
 });
 
 static SAMPLES: SharedAnalogSamples = SharedAnalogSamples::new();
@@ -58,13 +59,8 @@ unsafe fn UART5() {
 }
 
 #[embassy_executor::task]
-async fn adc_task(
-    adc: Adc<'static, peripherals::ADC1>,
-    mux_inputs: MuxInputs,
-    raw_inputs: RawInputs,
-    select: SelectPins,
-) -> ! {
-    run_scanner(adc, mux_inputs, raw_inputs, select, &SAMPLES).await
+async fn adc_task(adc: SequenceAdc, select: SelectPins) -> ! {
+    run_scanner(adc, select, &SAMPLES).await
 }
 
 #[embassy_executor::main]
@@ -167,8 +163,11 @@ async fn main(spawner: Spawner) {
 
     // ADC scanner on the high-priority executor (pins generated from keyboard.json)
     let adc = Adc::new(p.ADC1);
-    let mux_inputs: MuxInputs = adc_mux_input_channels!(p);
-    let raw_inputs: RawInputs = adc_raw_input_channels!(p);
+    let mut mux_inputs: MuxInputs = adc_mux_input_channels!(p);
+    let mut raw_inputs: RawInputs = adc_raw_input_channels!(p);
+    let request = embassy_stm32::adc::RxDma::<peripherals::ADC1>::request(&*p.DMA2_CH0);
+    let dma = embassy_stm32::dma::Channel::new(p.DMA2_CH0, Irqs);
+    let adc = SequenceAdc::new(adc, &mut mux_inputs, &mut raw_inputs, dma, request);
     let select: SelectPins = {
         let pins: [embassy_stm32::Peri<'static, AnyPin>; kb::ADC_MUX_SELECT_PINS.len()] =
             adc_mux_select_pins!(p);
@@ -176,7 +175,7 @@ async fn main(spawner: Spawner) {
     };
     interrupt::UART5.set_priority(Priority::P6);
     let adc_spawner = EXECUTOR_ADC.start(interrupt::UART5);
-    adc_spawner.spawn(unwrap!(adc_task(adc, mux_inputs, raw_inputs, select)));
+    adc_spawner.spawn(unwrap!(adc_task(adc, select)));
 
     // Wait for one complete matrix pass before calibrating
     while SAMPLES.generation() == 0 {

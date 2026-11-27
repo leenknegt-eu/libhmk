@@ -37,7 +37,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::PacketPool;
 
-use crate::analog::{make_select_output, run_scanner, AdcInputs, SharedAnalogSamples, SCAN_DONE};
+use crate::analog::{make_select_output, run_scanner, AdcInputs, SettleTimer, SharedAnalogSamples, SCAN_DONE};
 use crate::ble::{run_ble, NrfBleController, BLE_HID_TX, BLE_RAW_TX};
 use crate::board::NrfBoard;
 use crate::flash::NrfFlash;
@@ -89,8 +89,9 @@ async fn saadc_task(
     saadc: embassy_nrf::Peri<'static, embassy_nrf::peripherals::SAADC>,
     inputs: AdcInputs,
     select_pins: [embassy_nrf::gpio::Output<'static>; kb::ADC_MUX_SELECT_PINS.len()],
+    settle_timer: SettleTimer,
 ) -> ! {
-    run_scanner(saadc, inputs, select_pins, &SAMPLES).await
+    run_scanner(saadc, inputs, select_pins, settle_timer, &SAMPLES).await
 }
 
 #[embassy_executor::task]
@@ -174,7 +175,13 @@ async fn main(spawner: Spawner) {
     let inputs: AdcInputs = adc_inputs!(p);
     let select_pins: [embassy_nrf::Peri<'static, embassy_nrf::gpio::AnyPin>; kb::ADC_MUX_SELECT_PINS.len()] =
         adc_mux_select_pins!(p);
-    spawner.spawn(unwrap!(saadc_task(p.SAADC, inputs, select_pins.map(make_select_output))));
+    let settle_timer = SettleTimer::new(p.TIMER1);
+    spawner.spawn(unwrap!(saadc_task(
+        p.SAADC,
+        inputs,
+        select_pins.map(make_select_output),
+        settle_timer
+    )));
 
     // 5. Initialize libhmk-core Firmware engine
     let mut flash = NrfFlash::new(Nvmc::new(p.NVMC));

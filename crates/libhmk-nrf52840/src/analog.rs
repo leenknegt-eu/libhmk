@@ -1,14 +1,20 @@
 //! nRF52840 SAADC matrix scanner with multiplexer control, power-saving scan throttling,
 //! and battery voltage measurement (VDD or external voltage divider pin).
 
-use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::future::poll_fn;
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use core::task::Poll;
 
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::peripherals;
 use embassy_nrf::saadc::{
     ChannelConfig, Config, Gain, Input, Reference, Resolution, Saadc, Time, VddInput,
 };
-use embassy_nrf::Peri;
+use embassy_nrf::interrupt::{self, InterruptExt, Priority};
+use embassy_nrf::pac;
+use embassy_nrf::pac::timer::vals::{Bitmode, Mode as TimerMode};
+use embassy_nrf::{interrupt as nrf_interrupt, Peri};
+use embassy_sync::waitqueue::AtomicWaker;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
@@ -145,6 +151,61 @@ pub fn battery_channel_config<'d>(pin: impl Input + 'd) -> ChannelConfig<'d> {
 
 include!(concat!(env!("OUT_DIR"), "/pins_gen.rs"));
 
+/// One-shot microsecond delay on TIMER1 (1 MHz) for the multiplexer settle time.
+///
+/// The embassy time driver on nRF52 is the 32.768 kHz RTC: `Timer::after(20 us)` becomes
+/// "now + 1 tick" with `now` truncated, i.e. anywhere between 0 and 30.5 us. The C firmware
+/// uses TIMER1 for this, as does this driver.
+pub struct SettleTimer {
+    _timer: Peri<'static, peripherals::TIMER1>,
+}
+
+static SETTLE_WAKER: AtomicWaker = AtomicWaker::new();
+static SETTLE_DONE: AtomicBool = AtomicBool::new(false);
+
+impl SettleTimer {
+    pub fn new(timer: Peri<'static, peripherals::TIMER1>) -> Self {
+        let t = pac::TIMER1;
+        t.tasks_stop().write_value(1);
+        t.mode().write(|w| w.set_mode(TimerMode::Timer));
+        t.bitmode().write(|w| w.set_bitmode(Bitmode::_32bit));
+        t.prescaler().write(|w| w.set_prescaler(4)); // 16 MHz / 2^4 = 1 MHz
+        t.shorts().write(|w| w.set_compare_stop(0, true));
+        t.events_compare(0).write_value(0);
+        t.intenset().write(|w| w.set_compare(0, true));
+        interrupt::TIMER1.set_priority(Priority::P3);
+        unsafe { interrupt::TIMER1.enable() };
+        Self { _timer: timer }
+    }
+
+    pub async fn delay_us(&mut self, us: u32) {
+        let t = pac::TIMER1;
+        SETTLE_DONE.store(false, Ordering::Relaxed);
+        t.tasks_clear().write_value(1);
+        t.cc(0).write_value(us.max(1));
+        t.tasks_start().write_value(1);
+        poll_fn(|cx| {
+            SETTLE_WAKER.register(cx.waker());
+            if SETTLE_DONE.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
+#[nrf_interrupt]
+fn TIMER1() {
+    let t = pac::TIMER1;
+    if t.events_compare(0).read() != 0 {
+        t.events_compare(0).write_value(0);
+        SETTLE_DONE.store(true, Ordering::Release);
+        SETTLE_WAKER.wake();
+    }
+}
+
 /// How often the battery voltage is measured (outside the matrix scan sequence).
 const BATTERY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -169,6 +230,7 @@ pub async fn run_scanner(
     mut saadc_p: Peri<'static, peripherals::SAADC>,
     mut inputs: AdcInputs,
     mut select_pins: [Output<'static>; kb::ADC_MUX_SELECT_PINS.len()],
+    mut settle_timer: SettleTimer,
     samples: &'static SharedAnalogSamples,
 ) -> ! {
     let settle = Duration::from_micros(kb::ADC_SAMPLE_DELAY_US as u64);
@@ -193,7 +255,7 @@ pub async fn run_scanner(
                         pin.set_low();
                     }
                 }
-                Timer::after(settle).await;
+                settle_timer.delay_us(kb::ADC_SAMPLE_DELAY_US).await;
                 saadc.sample(&mut buf).await;
                 for (&key, &val) in keys.iter().zip(buf.iter()) {
                     samples.store_key(key, val);
