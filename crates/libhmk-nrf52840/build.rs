@@ -35,5 +35,55 @@ fn main() {
     )
     .expect("Failed to write memory.x");
 
+    // SAADC / multiplexer peripheral bindings generated from keyboard.json
+    let pins = cfg.adc_pins().expect("Invalid analog pin configuration");
+    // "P0.02" -> "P0_02"
+    let periph = |name: &str| name.replace('.', "_");
+    let inputs: Vec<String> = pins.mux_input.iter().chain(pins.raw_input.iter()).map(|n| periph(n)).collect();
+    let mut gen = String::new();
+    gen.push_str(&format!(
+        "/// Number of SAADC channels sampled per scan step (mux inputs + raw inputs).\n\
+         pub const NUM_SAADC_CHANNELS: usize = {};\n",
+        inputs.len()
+    ));
+    gen.push_str("/// SAADC input pins owned by the scanner task.\npub struct AdcInputs {\n");
+    for (i, n) in inputs.iter().enumerate() {
+        gen.push_str(&format!("    pub in{i}: Peri<'static, peripherals::{n}>,\n"));
+    }
+    if let Some(b) = &pins.battery {
+        gen.push_str(&format!("    pub battery: Peri<'static, peripherals::{}>,\n", periph(b)));
+    }
+    gen.push_str("}\n\nimpl AdcInputs {\n");
+    gen.push_str("    /// Channel configs for the matrix sequence (mux inputs first, then raw inputs).\n");
+    gen.push_str("    pub fn matrix_configs(&mut self) -> [ChannelConfig<'_>; NUM_SAADC_CHANNELS] {\n        [");
+    for i in 0..inputs.len() {
+        gen.push_str(&format!("matrix_channel_config(self.in{i}.reborrow()), "));
+    }
+    gen.push_str("]\n    }\n\n");
+    gen.push_str("    /// Channel config for the battery voltage measurement.\n");
+    gen.push_str("    pub fn battery_config(&mut self) -> ChannelConfig<'_> {\n");
+    if pins.battery.is_some() {
+        gen.push_str("        battery_channel_config(self.battery.reborrow())\n");
+    } else {
+        gen.push_str("        battery_channel_config(VddInput)\n");
+    }
+    gen.push_str("    }\n}\n\n");
+    gen.push_str("/// Move the SAADC input pins out of `embassy_nrf::Peripherals`.\n");
+    gen.push_str("macro_rules! adc_inputs { ($p:ident) => { $crate::analog::AdcInputs {");
+    for (i, n) in inputs.iter().enumerate() {
+        gen.push_str(&format!(" in{i}: $p.{n},"));
+    }
+    if let Some(b) = &pins.battery {
+        gen.push_str(&format!(" battery: $p.{},", periph(b)));
+    }
+    gen.push_str(" } }; }\n");
+    gen.push_str("/// Mux select pins (LSB first) as `[Peri<'static, AnyPin>; N]`.\n");
+    gen.push_str("macro_rules! adc_mux_select_pins { ($p:ident) => { [");
+    for n in &pins.mux_select {
+        gen.push_str(&format!("$p.{}.into(), ", periph(n)));
+    }
+    gen.push_str("] }; }\n");
+    fs::write(out_dir.join("pins_gen.rs"), gen).expect("Failed to write pins_gen.rs");
+
     println!("cargo:rustc-link-search={}", out_dir.display());
 }

@@ -35,5 +35,41 @@ fn main() {
     )
     .expect("Failed to write memory.x");
 
+    // GPIO tables for the ADC/mux pins declared in keyboard.json: (port index, pin number)
+    let pins = cfg.adc_pins().expect("Invalid analog pin configuration");
+    let gpio = |name: &str| -> (u8, u8) {
+        let mut chars = name.chars();
+        let port = chars.next().expect("empty pin name");
+        let num: u8 = chars.as_str().parse().expect("invalid pin number");
+        assert!(num < 16, "invalid pin '{name}'");
+        let idx = match port {
+            'A' => 0,
+            'B' => 1,
+            'C' => 2,
+            'D' => 3,
+            'F' => 5,
+            _ => panic!("unsupported GPIO port in '{name}'"),
+        };
+        (idx, num)
+    };
+    let table = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("{:?}", gpio(n)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let gen = format!(
+        "/// Mux select pins (LSB first) as `(port, pin)`; port 0 = GPIOA.\n\
+         pub const MUX_SELECT_GPIO: [(u8, u8); {}] = [{}];\n\
+         /// ADC input pins (mux inputs, then raw inputs) as `(port, pin)`.\n\
+         pub const ADC_INPUT_GPIO: [(u8, u8); {}] = [{}];\n",
+        pins.mux_select.len(),
+        table(&pins.mux_select),
+        pins.mux_input.len() + pins.raw_input.len(),
+        table(&[pins.mux_input.clone(), pins.raw_input.clone()].concat()),
+    );
+    fs::write(out_dir.join("pins_gen.rs"), gen).expect("Failed to write pins_gen.rs");
+
     println!("cargo:rustc-link-search={}", out_dir.display());
 }

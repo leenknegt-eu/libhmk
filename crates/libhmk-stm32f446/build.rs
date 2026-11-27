@@ -35,5 +35,28 @@ fn main() {
     )
     .expect("Failed to write memory.x");
 
+    // Peripheral bindings for the ADC/mux pins declared in keyboard.json
+    let pins = cfg.adc_pins().expect("Invalid analog pin configuration");
+    let periph = |name: &str| format!("P{name}");
+    let list = |names: &[String], suffix: &str| {
+        names
+            .iter()
+            .map(|n| format!("$p.{}{suffix}", periph(n)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let gen = format!(
+        "/// Mux select pins (LSB first) as `[Peri<'static, AnyPin>; N]`.\n\
+         macro_rules! adc_mux_select_pins {{ ($p:ident) => {{ [{}] }}; }}\n\
+         /// Multiplexed ADC inputs as `[AnyAdcChannel<'static, ADC1>; N]`.\n\
+         macro_rules! adc_mux_input_channels {{ ($p:ident) => {{ [{}] }}; }}\n\
+         /// Direct (non-multiplexed) ADC inputs as `[AnyAdcChannel<'static, ADC1>; N]`.\n\
+         macro_rules! adc_raw_input_channels {{ ($p:ident) => {{ [{}] }}; }}\n",
+        list(&pins.mux_select, ".into()"),
+        list(&pins.mux_input, ".degrade_adc()"),
+        list(&pins.raw_input, ".degrade_adc()"),
+    );
+    fs::write(out_dir.join("pins_gen.rs"), gen).expect("Failed to write pins_gen.rs");
+
     println!("cargo:rustc-link-search={}", out_dir.display());
 }

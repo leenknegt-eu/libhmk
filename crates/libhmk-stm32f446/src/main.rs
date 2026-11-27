@@ -12,12 +12,17 @@ pub mod kb {
     include!(concat!(env!("OUT_DIR"), "/keyboard_gen.rs"));
 }
 
+include!(concat!(env!("OUT_DIR"), "/pins_gen.rs"));
+
 use defmt::{info, unwrap};
 use defmt_rtt as _;
-use embassy_executor::Spawner;
-use embassy_stm32::adc::{Adc, SampleTime};
+use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_futures::yield_now;
+use embassy_stm32::adc::{Adc, AdcChannel};
 use embassy_stm32::flash::Flash;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{AnyPin, Level, Output, Speed};
+use embassy_stm32::interrupt;
+use embassy_stm32::interrupt::{InterruptExt, Priority};
 use embassy_stm32::rcc::{
     AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllMul, PllPDiv, PllPreDiv, PllQDiv,
     PllSource, Sysclk,
@@ -25,7 +30,6 @@ use embassy_stm32::rcc::{
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::{Config as Stm32UsbConfig, Driver};
 use embassy_stm32::{bind_interrupts, peripherals, usb as stm32_usb, Config};
-use embassy_time::{Duration, Timer};
 use libhmk_core::eeconfig::{EeconfigDefaults, EeconfigLayout};
 use libhmk_core::matrix::MATRIX_CALIBRATION_DURATION_MS;
 use libhmk_core::traits::{CommandTransport, NoopBleControl};
@@ -34,7 +38,7 @@ use libhmk_core::Firmware;
 use panic_probe as _;
 use static_cell::StaticCell;
 
-use crate::analog::SharedAnalogSamples;
+use crate::analog::{run_scanner, MuxInputs, RawInputs, SelectPins, SharedAnalogSamples};
 use crate::board::Stm32Board;
 use crate::flash::Stm32Flash;
 use crate::usb::{usb_task, USB_CMD_RX, USB_HID_TX, USB_RAW_TX};
@@ -44,6 +48,24 @@ bind_interrupts!(struct Irqs {
 });
 
 static SAMPLES: SharedAnalogSamples = SharedAnalogSamples::new();
+
+/// High-priority executor for the ADC scanner (preempts the main keyboard loop).
+static EXECUTOR_ADC: InterruptExecutor = InterruptExecutor::new();
+
+#[interrupt]
+unsafe fn UART5() {
+    EXECUTOR_ADC.on_interrupt()
+}
+
+#[embassy_executor::task]
+async fn adc_task(
+    adc: Adc<'static, peripherals::ADC1>,
+    mux_inputs: MuxInputs,
+    raw_inputs: RawInputs,
+    select: SelectPins,
+) -> ! {
+    run_scanner(adc, mux_inputs, raw_inputs, select, &SAMPLES).await
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -88,23 +110,12 @@ async fn main(spawner: Spawner) {
     let serial_buf = SERIAL_BUF.init([0u8; 32]);
     let serial_len = Stm32Board::format_serial_hex(serial_buf);
     let serial_str = core::str::from_utf8(&serial_buf[..serial_len]).unwrap_or("00000000");
-    spawner.must_spawn(usb_task(usb_driver, serial_str));
+    spawner.spawn(unwrap!(usb_task(usb_driver, serial_str)));
 
     // Flash & Firmware initialization
     let mut flash = Stm32Flash::new(Flash::new_blocking(p.FLASH));
     let mut board = Stm32Board;
     let mut ble = NoopBleControl;
-
-    let mut adc = Adc::new(p.ADC1);
-    adc.set_sample_time(SampleTime::CYCLES3);
-    let mut mux_s0 = Output::new(p.PB12, Level::Low, Speed::VeryHigh);
-    let mut mux_s1 = Output::new(p.PB13, Level::Low, Speed::VeryHigh);
-    let mut mux_s2 = Output::new(p.PB14, Level::Low, Speed::VeryHigh);
-    let mut mux_s3 = Output::new(p.PB15, Level::Low, Speed::VeryHigh);
-    let mut adc_in0 = p.PA0;
-    let mut adc_in1 = p.PA1;
-    let mut adc_in2 = p.PA2;
-    let mut adc_in3 = p.PA3;
 
     let layout_cfg = EeconfigLayout {
         num_profiles: kb::NUM_PROFILES,
@@ -152,40 +163,27 @@ async fn main(spawner: Spawner) {
         kb::ADC_RESOLUTION,
         kb::MATRIX_INVERT_ADC_VALUES,
     ));
-    unwrap!(fw.init(&mut flash, &defaults));
+    defmt::assert!(fw.init(&mut flash, &defaults));
 
-    let mut scan_once = |adc: &mut Adc<'_, peripherals::ADC1>| {
-        for ch in 0..kb::ADC_MUX_NUM_CHANNELS {
-            mux_s0.set_level(if (ch & 1) != 0 { Level::High } else { Level::Low });
-            mux_s1.set_level(if (ch & 2) != 0 { Level::High } else { Level::Low });
-            mux_s2.set_level(if (ch & 4) != 0 { Level::High } else { Level::Low });
-            mux_s3.set_level(if (ch & 8) != 0 { Level::High } else { Level::Low });
-            cortex_m::asm::delay(180 * kb::ADC_SAMPLE_DELAY_US);
-
-            let readings = [
-                adc.blocking_read(&mut adc_in0),
-                adc.blocking_read(&mut adc_in1),
-                adc.blocking_read(&mut adc_in2),
-                adc.blocking_read(&mut adc_in3),
-            ];
-            for (i, &val) in readings.iter().enumerate() {
-                if i < kb::ADC_MUX_INPUT_MATRIX[ch].len() {
-                    let key = kb::ADC_MUX_INPUT_MATRIX[ch][i] as usize;
-                    if key != 0 {
-                        SAMPLES.store(key - 1, val);
-                    }
-                }
-            }
-        }
+    // ADC scanner on the high-priority executor (pins generated from keyboard.json)
+    let adc = Adc::new(p.ADC1);
+    let mux_inputs: MuxInputs = adc_mux_input_channels!(p);
+    let raw_inputs: RawInputs = adc_raw_input_channels!(p);
+    let select: SelectPins = {
+        let pins: [embassy_stm32::Peri<'static, AnyPin>; kb::ADC_MUX_SELECT_PINS.len()] =
+            adc_mux_select_pins!(p);
+        pins.map(|pin| Output::new(pin, Level::Low, Speed::VeryHigh))
     };
+    interrupt::UART5.set_priority(Priority::P6);
+    let adc_spawner = EXECUTOR_ADC.start(interrupt::UART5);
+    adc_spawner.spawn(unwrap!(adc_task(adc, mux_inputs, raw_inputs, select)));
 
-    fw.matrix.begin_recalibrate(&mut fw.eeconfig, &mut flash, false);
-    let cal_start = embassy_time::Instant::now();
-    while cal_start.elapsed().as_millis() < MATRIX_CALIBRATION_DURATION_MS as u64 {
-        scan_once(&mut adc);
-        fw.matrix.calibrate_step(&SAMPLES, &fw.eeconfig);
-        Timer::after(Duration::from_micros(200)).await;
+    // Wait for one complete matrix pass before calibrating
+    while SAMPLES.generation() == 0 {
+        yield_now().await;
     }
+
+    calibrate(fw, &mut flash, false).await;
 
     loop {
         if let Ok(req) = USB_CMD_RX.try_receive() {
@@ -199,13 +197,36 @@ async fn main(spawner: Spawner) {
                 &mut ble,
             );
             let _ = USB_RAW_TX.try_send(resp);
+            if fw.commands.recalibrate_requested {
+                fw.commands.recalibrate_requested = false;
+                calibrate(fw, &mut flash, true).await;
+            }
         }
 
-        scan_once(&mut adc);
         let out = fw.step(&SAMPLES, &mut flash, &mut board, &mut ble);
         if !out.hid.is_empty() {
             let _ = USB_HID_TX.try_send(out.hid);
         }
-        Timer::after(Duration::from_micros(100)).await;
+        // Free-running loop like the C superloop; yield so USB tasks get serviced.
+        yield_now().await;
+    }
+}
+
+type Fw = Firmware<
+    { kb::NUM_KEYS },
+    { kb::NUM_LAYERS },
+    { kb::NUM_ADVANCED_KEYS },
+    { kb::NUM_DKS_MAX_BINDINGS },
+    { kb::WL_VIRTUAL_SIZE },
+    { kb::WL_WRITE_LOG_SIZE },
+>;
+
+/// Rest-value calibration: filter samples for `MATRIX_CALIBRATION_DURATION_MS`.
+async fn calibrate(fw: &mut Fw, flash: &mut Stm32Flash<'_>, reset_bottom_out: bool) {
+    fw.matrix.begin_recalibrate(&mut fw.eeconfig, flash, reset_bottom_out);
+    let start = embassy_time::Instant::now();
+    while start.elapsed().as_millis() < MATRIX_CALIBRATION_DURATION_MS as u64 {
+        fw.matrix.calibrate_step(&SAMPLES, &fw.eeconfig);
+        yield_now().await;
     }
 }

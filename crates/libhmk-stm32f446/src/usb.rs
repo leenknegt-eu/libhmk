@@ -5,10 +5,10 @@ use embassy_stm32::peripherals::USB_OTG_FS;
 use embassy_stm32::usb::Driver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_usb::class::hid::device::{
-    Config as HidConfig, HidReaderWriter, HidWriter, RequestHandler, State,
+use embassy_usb::class::hid::{
+    Config as HidConfig, HidBootProtocol, HidReaderWriter, HidSubclass, HidWriter, ReportId,
+    RequestHandler, State,
 };
-use embassy_usb::class::hid::{HidBootProtocol, HidSubclass, ReportId};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config as UsbConfig};
 use libhmk_core::hid::{
@@ -81,7 +81,6 @@ pub async fn usb_task(driver: Driver<'static, USB_OTG_FS>, serial: &'static str)
             max_packet_size: 64,
             hid_subclass: HidSubclass::Boot,
             hid_boot_protocol: HidBootProtocol::Keyboard,
-            interface_name: None,
         },
     );
 
@@ -93,9 +92,8 @@ pub async fn usb_task(driver: Driver<'static, USB_OTG_FS>, serial: &'static str)
             request_handler: None,
             poll_ms: 1,
             max_packet_size: 64,
-            hid_subclass: HidSubclass::NoSubclass,
+            hid_subclass: HidSubclass::No,
             hid_boot_protocol: HidBootProtocol::None,
-            interface_name: None,
         },
     );
 
@@ -107,9 +105,8 @@ pub async fn usb_task(driver: Driver<'static, USB_OTG_FS>, serial: &'static str)
             request_handler: Some(RAW_REQ.init(RawHidRequestHandler)),
             poll_ms: 1,
             max_packet_size: 64,
-            hid_subclass: HidSubclass::NoSubclass,
+            hid_subclass: HidSubclass::No,
             hid_boot_protocol: HidBootProtocol::None,
-            interface_name: None,
         },
     );
 

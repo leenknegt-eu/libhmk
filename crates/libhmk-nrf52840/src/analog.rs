@@ -4,11 +4,20 @@
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
-use embassy_nrf::saadc::{ChannelConfig, Config, Gain, Reference, Resolution, Saadc, Time};
-use embassy_time::{Duration, Timer};
+use embassy_nrf::peripherals;
+use embassy_nrf::saadc::{
+    ChannelConfig, Config, Gain, Input, Reference, Resolution, Saadc, Time, VddInput,
+};
+use embassy_nrf::Peri;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant, Timer};
 use libhmk_core::traits::AnalogInput;
 
 use crate::kb;
+
+/// Signalled after every complete matrix pass (wakes the main loop on battery power).
+pub static SCAN_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 const ADC_MAX_VALUE: u16 = ((1u32 << kb::ADC_RESOLUTION) - 1) as u16;
 
@@ -17,6 +26,8 @@ pub struct SharedAnalogSamples {
     values: [AtomicU16; kb::NUM_KEYS],
     scan_interval_us: AtomicU32,
     battery_mv: AtomicU16,
+    /// Incremented after every complete matrix pass.
+    generation: AtomicU32,
 }
 
 impl SharedAnalogSamples {
@@ -27,19 +38,25 @@ impl SharedAnalogSamples {
             values: [ZERO; kb::NUM_KEYS],
             scan_interval_us: AtomicU32::new(0),
             battery_mv: AtomicU16::new(3000),
+            generation: AtomicU32::new(0),
         }
     }
 
+    /// Store a sample for a 1-based key index from the generated matrix (0 = not connected).
     #[inline]
-    pub fn store(&self, key: usize, sample: i16) {
-        if key < kb::NUM_KEYS {
+    fn store_key(&self, key: u16, sample: i16) {
+        if let Some(slot) = (key as usize).checked_sub(1).and_then(|k| self.values.get(k)) {
             let clamped = if sample <= 0 {
                 0
             } else {
                 (sample as u16).min(ADC_MAX_VALUE)
             };
-            self.values[key].store(clamped, Ordering::Relaxed);
+            slot.store(clamped, Ordering::Relaxed);
         }
+    }
+
+    pub fn generation(&self) -> u32 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn set_scan_interval_us(&self, us: u32) {
@@ -87,11 +104,11 @@ impl SharedAnalogSamples {
 }
 
 impl AnalogInput for SharedAnalogSamples {
+    #[inline]
     fn read_raw(&self, key: usize) -> u16 {
-        if key < kb::NUM_KEYS {
-            self.values[key].load(Ordering::Relaxed)
-        } else {
-            0
+        match self.values.get(key) {
+            Some(v) => v.load(Ordering::Relaxed),
+            None => 0,
         }
     }
 }
@@ -99,78 +116,110 @@ impl AnalogInput for SharedAnalogSamples {
 pub fn saadc_config() -> Config {
     let mut cfg = Config::default();
     cfg.resolution = match kb::ADC_RESOLUTION {
-        8 => Resolution::_8BIT,
-        10 => Resolution::_10BIT,
-        14 => Resolution::_14BIT,
-        _ => Resolution::_12BIT,
+        8 => Resolution::_8bit,
+        10 => Resolution::_10bit,
+        14 => Resolution::_14bit,
+        _ => Resolution::_12bit,
     };
     cfg
 }
 
-pub fn matrix_channel_config<P: embassy_nrf::saadc::Input>(pin: P) -> ChannelConfig<'static> {
+pub fn matrix_channel_config<'d>(pin: impl Input + 'd) -> ChannelConfig<'d> {
     let mut ch = ChannelConfig::single_ended(pin);
     // Ratiometric 0..VDD range for Hall-effect sensors
-    ch.gain = Gain::GAIN1_4;
+    ch.gain = Gain::Gain1_4;
     ch.reference = Reference::VDD1_4;
+    // Matches the C firmware (`SAADC_CH_CONFIG_TACQ_3us`)
     ch.time = Time::_3US;
     ch
 }
 
-pub fn vdd_battery_channel_config() -> ChannelConfig<'static> {
-    let mut ch = ChannelConfig::single_ended(embassy_nrf::saadc::VddInput);
+pub fn battery_channel_config<'d>(pin: impl Input + 'd) -> ChannelConfig<'d> {
+    let mut ch = ChannelConfig::single_ended(pin);
     // 0.6V internal ref + 1/6 gain => 0..3.6V full scale
-    ch.gain = Gain::GAIN1_6;
-    ch.reference = Reference::INTERNAL;
+    ch.gain = Gain::Gain1_6;
+    ch.reference = Reference::Internal;
     ch.time = Time::_10US;
     ch
 }
 
-/// Continuously scan multiplexed SAADC channels + VDD battery channel into `samples`.
-pub async fn run_mux_scanner<const N: usize>(
-    mut saadc: Saadc<'static, N>,
-    mut select_pins: [Output<'static>; 3],
+include!(concat!(env!("OUT_DIR"), "/pins_gen.rs"));
+
+/// How often the battery voltage is measured (outside the matrix scan sequence).
+const BATTERY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Measure the battery voltage once with a dedicated single-channel SAADC configuration.
+async fn measure_battery_mv(
+    saadc_p: &mut Peri<'static, peripherals::SAADC>,
+    inputs: &mut AdcInputs,
+) -> u16 {
+    let mut saadc = Saadc::new(saadc_p.reborrow(), crate::Irqs, saadc_config(), [inputs.battery_config()]);
+    let mut buf = [0i16; 1];
+    saadc.sample(&mut buf).await;
+    let raw = buf[0].max(0) as u32;
+    let adc_mv = (raw * 3600) >> kb::ADC_RESOLUTION;
+    ((adc_mv * kb::BLE_BATTERY_DIVIDER_MILLIS) / 1000) as u16
+}
+
+/// Continuously scan the multiplexed and raw SAADC inputs into `samples`.
+///
+/// The battery voltage is sampled every [`BATTERY_INTERVAL`] with its own SAADC
+/// configuration, so the per-mux-step sequence only contains matrix channels.
+pub async fn run_scanner(
+    mut saadc_p: Peri<'static, peripherals::SAADC>,
+    mut inputs: AdcInputs,
+    mut select_pins: [Output<'static>; kb::ADC_MUX_SELECT_PINS.len()],
     samples: &'static SharedAnalogSamples,
 ) -> ! {
-    saadc.calibrate().await;
-    let mut buf = [0i16; N];
+    let settle = Duration::from_micros(kb::ADC_SAMPLE_DELAY_US as u64);
     let num_mux_inputs = kb::ADC_MUX_INPUT_CHANNELS.len();
+    let mut buf = [0i16; NUM_SAADC_CHANNELS];
 
     loop {
-        for mux_ch in 0..kb::ADC_MUX_NUM_CHANNELS {
-            for (bit, pin) in select_pins.iter_mut().enumerate() {
-                if ((mux_ch >> bit) & 1) != 0 {
-                    pin.set_high();
-                } else {
-                    pin.set_low();
-                }
-            }
-            Timer::after(Duration::from_micros(kb::ADC_SAMPLE_DELAY_US as u64)).await;
-
-            saadc.sample(&mut buf).await;
-
-            for i in 0..num_mux_inputs {
-                let key = kb::ADC_MUX_INPUT_MATRIX[mux_ch][i] as usize;
-                if key != 0 {
-                    samples.store(key - 1, buf[i]);
-                }
-            }
-
-            // Last channel in `buf` carries internal VDD sample for Battery Service
-            if N > num_mux_inputs {
-                let raw = buf[num_mux_inputs].max(0) as u32;
-                let adc_mv = (raw * 3600) >> kb::ADC_RESOLUTION;
-                let mv = (adc_mv * kb::BLE_BATTERY_DIVIDER_MILLIS) / 1000;
-                samples.set_battery_mv(mv as u16);
-            }
+        if kb::BLUETOOTH_ENABLED {
+            samples.set_battery_mv(measure_battery_mv(&mut saadc_p, &mut inputs).await);
         }
 
-        let interval = samples.scan_interval_us();
-        if interval > 0 {
-            Timer::after(Duration::from_micros(interval as u64)).await;
+        let mut saadc = Saadc::new(saadc_p.reborrow(), crate::Irqs, saadc_config(), inputs.matrix_configs());
+        saadc.calibrate().await;
+        let battery_due = Instant::now() + BATTERY_INTERVAL;
+
+        while !kb::BLUETOOTH_ENABLED || Instant::now() < battery_due {
+            for (mux_ch, keys) in kb::ADC_MUX_INPUT_MATRIX.iter().enumerate() {
+                for (bit, pin) in select_pins.iter_mut().enumerate() {
+                    if (mux_ch >> bit) & 1 != 0 {
+                        pin.set_high();
+                    } else {
+                        pin.set_low();
+                    }
+                }
+                Timer::after(settle).await;
+                saadc.sample(&mut buf).await;
+                for (&key, &val) in keys.iter().zip(buf.iter()) {
+                    samples.store_key(key, val);
+                }
+            }
+
+            if kb::ADC_MUX_NUM_CHANNELS == 0 {
+                saadc.sample(&mut buf).await;
+            }
+            for (&key, &val) in kb::ADC_RAW_INPUT_VECTOR.iter().zip(buf[num_mux_inputs..].iter()) {
+                samples.store_key(key, val);
+            }
+
+            samples.generation.fetch_add(1, Ordering::Release);
+            SCAN_DONE.signal(());
+
+            let interval = samples.scan_interval_us();
+            if interval > 0 {
+                Timer::after(Duration::from_micros(interval as u64)).await;
+            } else if kb::ADC_MUX_NUM_CHANNELS == 0 {
+                Timer::after(settle).await;
+            }
         }
     }
 }
 
-pub fn make_select_output(pin: embassy_nrf::Peri<'static, embassy_nrf::gpio::AnyPin>) -> Output<'static> {
+pub fn make_select_output(pin: Peri<'static, embassy_nrf::gpio::AnyPin>) -> Output<'static> {
     Output::new(pin, Level::Low, OutputDrive::HighDrive)
 }

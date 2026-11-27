@@ -7,8 +7,10 @@ use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::Driver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_usb::class::hid::device::{Config as HidConfig, HidReaderWriter, HidWriter, RequestHandler, State};
-use embassy_usb::class::hid::{HidBootProtocol, HidSubclass, ReportId};
+use embassy_usb::class::hid::{
+    Config as HidConfig, HidBootProtocol, HidReaderWriter, HidSubclass, HidWriter, ReportId,
+    RequestHandler, State,
+};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config as UsbConfig, Handler};
 use libhmk_core::hid::{
@@ -127,7 +129,6 @@ pub async fn usb_task(
             max_packet_size: 64,
             hid_subclass: HidSubclass::Boot,
             hid_boot_protocol: HidBootProtocol::Keyboard,
-            interface_name: None,
         },
     );
 
@@ -140,9 +141,8 @@ pub async fn usb_task(
             request_handler: None,
             poll_ms: 1,
             max_packet_size: 64,
-            hid_subclass: HidSubclass::NoSubclass,
+            hid_subclass: HidSubclass::No,
             hid_boot_protocol: HidBootProtocol::None,
-            interface_name: None,
         },
     );
 
@@ -155,9 +155,8 @@ pub async fn usb_task(
             request_handler: Some(RAW_REQ_HANDLER.init(RawHidRequestHandler)),
             poll_ms: 1,
             max_packet_size: 64,
-            hid_subclass: HidSubclass::NoSubclass,
+            hid_subclass: HidSubclass::No,
             hid_boot_protocol: HidBootProtocol::None,
-            interface_name: None,
         },
     );
 

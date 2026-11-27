@@ -18,3 +18,13 @@ defmt = { workspace = true }
 defmt-rtt = { workspace = true }
 panic-probe = { workspace = true }
 static_cell = { workspace = true }
+critical-section = "1.2"
+
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-time-driver = "0.2"
+embassy-time-queue-utils = "0.3"
+embassy-usb = { workspace = true, features = ["defmt"] }
+embassy-usb-synopsys-otg = { version = "0.4", features = ["defmt"] }

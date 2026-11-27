@@ -8,7 +8,7 @@ use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Instant, Timer};
 use libhmk_core::hid::{
     KeyboardReport, MouseReport, PendingHidReports, BLE_HID_REPORT_MAP, BLE_REPORT_ID_CONSUMER,
     BLE_REPORT_ID_KEYBOARD, BLE_REPORT_ID_MOUSE, BLE_REPORT_ID_RAW_HID, BLE_REPORT_ID_SYSTEM,
@@ -40,7 +40,8 @@ static LAST_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
 
 #[gatt_server]
 struct KeyboardGattServer {
-    dis: DeviceInfoService,
+    // Registered in the attribute table; never accessed directly (read-only values).
+    _dis: DeviceInfoService,
     bas: BatteryService,
     hids: HidService,
 }

@@ -147,6 +147,16 @@ pub struct KeyboardActuation {
     pub actuation_point: u8,
 }
 
+/// ADC pin names (as written in the driver's `input_pins` table) used by a keyboard.
+#[derive(Debug, Clone, Default)]
+pub struct AdcPins {
+    pub mux_select: Vec<String>,
+    pub mux_input: Vec<String>,
+    pub raw_input: Vec<String>,
+    /// Battery voltage sense pin (Bluetooth keyboards); `None` measures VDD directly.
+    pub battery: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyboardConfig {
     pub name: String,
@@ -290,6 +300,30 @@ impl KeyboardConfig {
             }
             AdcInputRef::Pin(pin) => driver.adc.pin_to_channel(pin),
         }
+    }
+
+    /// Resolved ADC pin names for firmware-side peripheral binding code generation.
+    pub fn adc_pins(&self) -> Result<AdcPins, String> {
+        let driver = self.driver()?;
+        let name = |r: &AdcInputRef| -> Result<String, String> {
+            Ok(driver.adc.input_pins[self.resolve_adc_channel(r)? as usize].to_string())
+        };
+        let (mux_select, mux_input) = match &self.analog.mux {
+            Some(m) => (
+                m.select.clone(),
+                m.input.iter().map(name).collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let raw_input = match &self.analog.raw {
+            Some(r) => r.input.iter().map(name).collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        let battery = match self.bluetooth.as_ref().and_then(|b| b.battery_pin.as_ref()) {
+            Some(pin) => Some(name(pin)?),
+            None => None,
+        };
+        Ok(AdcPins { mux_select, mux_input, raw_input, battery })
     }
 
     /// Build gzip-compressed JSON metadata compatible with `hmkconf`.
@@ -526,7 +560,9 @@ impl KeyboardConfig {
             driver.flash.base_addr + wl_base,
             flash_total - wl_base,
             driver.ram_origin,
-            driver.ram_size,
+            // cortex-m-rt requires an 8-byte aligned stack top; any bytes reserved at the top
+            // of RAM (bootloader magic) stay outside the linker's RAM region.
+            driver.ram_size & !7,
         ))
     }
 }

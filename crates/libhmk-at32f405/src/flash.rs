@@ -1,6 +1,6 @@
 //! AT32F405xx internal flash driver (uniform 2 KB sectors) via `at32f4xx-pac`.
 
-use at32f4xx_pac::FLASH;
+use at32f4xx_pac::at32f405::FLASH;
 use libhmk_core::traits::FlashStorage;
 
 use crate::kb;
