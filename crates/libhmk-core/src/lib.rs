@@ -15,6 +15,7 @@ pub mod distance;
 pub mod eeconfig;
 pub mod hid;
 pub mod keycodes;
+pub mod keymask;
 pub mod layout;
 pub mod matrix;
 pub mod traits;

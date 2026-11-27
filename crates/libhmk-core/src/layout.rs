@@ -7,6 +7,7 @@ use crate::deferred_actions::{
 use crate::eeconfig::Eeconfig;
 use crate::hid::{HidState, PendingHidReports};
 use crate::keycodes::*;
+use crate::keymask::KeyMask;
 use crate::matrix::Matrix;
 use crate::traits::{BleControl, BleTransportMode, BoardControl, FlashStorage};
 use crate::types::{AdvancedKeyType, GamepadButton};
@@ -22,10 +23,10 @@ pub struct LayoutEngine<
     default_layer: u8,
     should_send_reports: bool,
     last_ak_tick: u32,
-    key_disabled: [bool; NUM_KEYS],
-    key_press_states: [bool; NUM_KEYS],
-    /// Scratch flags of keys with pending events for the current [`Self::task`] call.
-    pending_events: [bool; NUM_KEYS],
+    key_disabled: KeyMask,
+    key_press_states: KeyMask,
+    /// Keys with an active advanced key (`active_advanced_keys[i] != 0`).
+    ak_active: KeyMask,
     active_keycodes: [u8; NUM_KEYS],
     advanced_key_indices: [[u8; NUM_KEYS]; NUM_LAYERS],
     active_advanced_keys: [u8; NUM_KEYS],
@@ -46,9 +47,9 @@ impl<
             default_layer: 0,
             should_send_reports: false,
             last_ak_tick: 0,
-            key_disabled: [false; NUM_KEYS],
-            key_press_states: [false; NUM_KEYS],
-            pending_events: [false; NUM_KEYS],
+            key_disabled: KeyMask::new(),
+            key_press_states: KeyMask::new(),
+            ak_active: KeyMask::new(),
             active_keycodes: [0; NUM_KEYS],
             advanced_key_indices: [[0; NUM_KEYS]; NUM_LAYERS],
             active_advanced_keys: [0; NUM_KEYS],
@@ -151,6 +152,7 @@ impl<
             let ak_index = self.advanced_key_indices[current_layer as usize][i];
             if ak_index != 0 {
                 self.active_advanced_keys[i] = ak_index;
+                self.ak_active.set(i, true);
                 let idx = (ak_index - 1) as usize;
                 let mut emit = ActionEmitter::new();
                 self.advanced_keys.process(
@@ -186,6 +188,7 @@ impl<
             let ak_index = self.active_advanced_keys[i];
             if ak_index != 0 {
                 self.active_advanced_keys[i] = 0;
+                self.ak_active.set(i, false);
                 let mut emit = ActionEmitter::new();
                 self.advanced_keys.process(
                     AkEvent {
@@ -260,61 +263,68 @@ impl<
         } else {
             None
         };
-        let mut num_events = 0usize;
-        for i in 0..NUM_KEYS {
-            let k = &matrix.keys[i];
-            let mut has_event = false;
-
-            if let Some(buttons) = gamepad_buttons {
+        // Keys excluded from keyboard processing this scan (XInput override / keyboard off).
+        let mut skip = KeyMask::new();
+        if let Some(buttons) = gamepad_buttons {
+            for (i, k) in matrix.keys.iter().enumerate() {
                 let gp_btn = buttons.get(i).copied().unwrap_or(GamepadButton::None as u8);
                 if gp_btn != GamepadButton::None as u8 {
                     xinput.process_key(i, k, gp_btn);
                     if gp_opts.gamepad_override() {
-                        self.pending_events[i] = false;
-                        continue;
+                        skip.set(i, true);
                     }
                 }
                 if !gp_opts.keyboard_enabled() {
-                    self.pending_events[i] = false;
-                    continue;
+                    skip.set(i, true);
                 }
             }
+        }
 
-            if !(current_layer == 0 && self.key_disabled[i]) {
-                let last_pressed = self.key_press_states[i];
-                has_event = k.is_pressed != last_pressed
-                    || (k.is_pressed && self.active_advanced_keys[i] != 0);
+        // Pass 1: press/release edges and held advanced keys, a few word ops per 32 keys.
+        let num_words = KeyMask::words_for(NUM_KEYS);
+        let pressed_mask = matrix.pressed_mask();
+        let mut events = KeyMask::new();
+        let mut any_event = 0u32;
+        for w in 0..num_words {
+            let pressed = pressed_mask.words[w];
+            let mut e = (pressed ^ self.key_press_states.words[w])
+                | (pressed & self.ak_active.words[w]);
+            e &= !skip.words[w];
+            if current_layer == 0 {
+                e &= !self.key_disabled.words[w];
             }
-            self.pending_events[i] = has_event;
-            num_events += has_event as usize;
+            events.words[w] = e;
+            any_event |= e;
         }
 
         // Pass 2: dispatch events in key order (rare; kept out of the scan loop).
-        if num_events > 0 {
-            for i in 0..NUM_KEYS {
-                if !self.pending_events[i] {
-                    continue;
+        if any_event != 0 {
+            for w in 0..num_words {
+                let mut e = events.words[w];
+                while e != 0 {
+                    let i = w * 32 + e.trailing_zeros() as usize;
+                    e &= e - 1;
+                    // A key-lock toggled by an earlier key in this pass still applies.
+                    if current_layer == 0 && self.key_disabled.get(i) {
+                        continue;
+                    }
+                    let is_pressed = matrix.keys[i].is_pressed;
+                    let last_pressed = self.key_press_states.get(i);
+                    has_non_tap_hold_press |= self.key_event(
+                        i,
+                        is_pressed,
+                        last_pressed,
+                        now_ms,
+                        current_layer,
+                        ee,
+                        flash,
+                        matrix,
+                        hid,
+                        board,
+                        ble,
+                    );
+                    self.key_press_states.set(i, is_pressed);
                 }
-                // A key-lock toggled by an earlier key in this pass still applies.
-                if current_layer == 0 && self.key_disabled[i] {
-                    continue;
-                }
-                let is_pressed = matrix.keys[i].is_pressed;
-                let last_pressed = self.key_press_states[i];
-                has_non_tap_hold_press |= self.key_event(
-                    i,
-                    is_pressed,
-                    last_pressed,
-                    now_ms,
-                    current_layer,
-                    ee,
-                    flash,
-                    matrix,
-                    hid,
-                    board,
-                    ble,
-                );
-                self.key_press_states[i] = is_pressed;
             }
         }
 
@@ -429,7 +439,9 @@ impl<
             match keycode {
                 SP_KEY_LOCK => {
                     if (key as usize) < NUM_KEYS {
-                        self.key_disabled[key as usize] = !self.key_disabled[key as usize];
+                        if (key as usize) < NUM_KEYS {
+                            self.key_disabled.toggle(key as usize);
+                        }
                     }
                 }
                 SP_LAYER_LOCK => {
