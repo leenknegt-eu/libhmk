@@ -2,7 +2,7 @@
 
 use crate::traits::FlashStorage;
 use crate::types::{
-    Actuation, AdvancedKey, Calibration, EeconfigOptions, GamepadOptions, MacroNode,
+    Actuation, AdvancedKeyRef, Calibration, EeconfigOptions, GamepadOptions, MacroNode,
 };
 use crate::wear_leveling::WearLeveling;
 
@@ -323,16 +323,30 @@ impl<const VIRTUAL_SIZE: usize, const WRITE_LOG_SIZE: usize>
         Actuation::from_bytes(&self.wl.cache[off..off + Actuation::SIZE])
     }
 
+    /// Raw actuation map of `profile`: `num_keys` packed 4-byte [`Actuation`] records.
+    ///
+    /// Lets the matrix scan resolve the slice once per scan instead of once per key.
+    pub fn actuation_map(&self, profile: usize) -> &[u8] {
+        let off = self.layout.profile_base(profile) + self.layout.profile_offset_actuation_map();
+        &self.wl.cache[off..off + self.layout.num_keys * Actuation::SIZE]
+    }
+
+    /// Raw gamepad button map of `profile` (`num_keys` bytes).
+    pub fn gamepad_buttons(&self, profile: usize) -> &[u8] {
+        let off = self.layout.profile_base(profile) + self.layout.profile_offset_gamepad_buttons();
+        &self.wl.cache[off..off + self.layout.num_keys]
+    }
+
     pub fn advanced_key<const MAX_BINDINGS: usize>(
         &self,
         profile: usize,
         index: usize,
-    ) -> AdvancedKey<MAX_BINDINGS> {
+    ) -> AdvancedKeyRef<'_, MAX_BINDINGS> {
         let size = self.layout.advanced_key_size();
         let off = self.layout.profile_base(profile)
             + self.layout.profile_offset_advanced_keys()
             + index * size;
-        AdvancedKey::from_bytes(&self.wl.cache[off..off + size])
+        AdvancedKeyRef::new(&self.wl.cache[off..off + size])
     }
 
     pub fn macro_node(&self, profile: usize, node_id: usize) -> MacroNode {
@@ -387,6 +401,19 @@ impl<const VIRTUAL_SIZE: usize, const WRITE_LOG_SIZE: usize>
             );
         }
         ok
+    }
+
+    pub fn set_actuation<F: FlashStorage>(
+        &mut self,
+        flash: &mut F,
+        profile: usize,
+        key: usize,
+        act: Actuation,
+    ) -> bool {
+        let off = self.layout.profile_base(profile)
+            + self.layout.profile_offset_actuation_map()
+            + key * Actuation::SIZE;
+        self.wl.write(flash, off, &act.to_bytes())
     }
 
     pub fn set_bottom_out_threshold<F: FlashStorage>(

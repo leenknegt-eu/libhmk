@@ -33,6 +33,16 @@ impl Actuation {
         }
     }
 
+    #[inline]
+    pub const fn from_array(b: [u8; Self::SIZE]) -> Self {
+        Self {
+            actuation_point: b[0],
+            rt_down: b[1],
+            rt_up: b[2],
+            continuous: b[3] != 0,
+        }
+    }
+
     pub fn to_bytes(self) -> [u8; Self::SIZE] {
         [
             self.actuation_point,
@@ -289,6 +299,88 @@ impl<const MAX_BINDINGS: usize> AdvancedKey<MAX_BINDINGS> {
 
     pub fn macro_head(&self) -> u8 {
         self.payload[0]
+    }
+}
+
+/// Zero-copy view of an advanced key record inside the `eeconfig` cache.
+///
+/// Hot paths (layout/advanced-key ticks) use this instead of [`AdvancedKey`], which copies
+/// the full 129-byte payload buffer on every access.
+#[derive(Debug, Clone, Copy)]
+pub struct AdvancedKeyRef<'a, const MAX_BINDINGS: usize> {
+    bytes: &'a [u8],
+}
+
+impl<'a, const MAX_BINDINGS: usize> AdvancedKeyRef<'a, MAX_BINDINGS> {
+    /// `bytes` must hold one full wire record (`AdvancedKey::<MAX_BINDINGS>::WIRE_SIZE`).
+    #[inline]
+    pub fn new(bytes: &'a [u8]) -> Self {
+        assert!(bytes.len() >= AdvancedKey::<MAX_BINDINGS>::WIRE_SIZE);
+        Self { bytes }
+    }
+
+    #[inline]
+    pub fn layer(&self) -> u8 {
+        self.bytes[0]
+    }
+
+    #[inline]
+    pub fn key(&self) -> u8 {
+        self.bytes[1]
+    }
+
+    #[inline]
+    pub fn kind(&self) -> AdvancedKeyType {
+        AdvancedKeyType::from(self.bytes[2])
+    }
+
+    #[inline]
+    fn payload(&self) -> &'a [u8] {
+        &self.bytes[3..AdvancedKey::<MAX_BINDINGS>::WIRE_SIZE]
+    }
+
+    pub fn null_bind(&self) -> NullBind {
+        let p = self.payload();
+        NullBind {
+            secondary_key: p[0],
+            behavior: p[1],
+            bottom_out_point: p[2],
+        }
+    }
+
+    pub fn dynamic_keystroke(&self) -> DynamicKeystroke<MAX_BINDINGS> {
+        let p = self.payload();
+        let mut dks = DynamicKeystroke::default();
+        dks.keycodes.copy_from_slice(&p[..MAX_BINDINGS]);
+        dks.bitmap.copy_from_slice(&p[MAX_BINDINGS..2 * MAX_BINDINGS]);
+        dks.bottom_out_point = p[2 * MAX_BINDINGS];
+        dks
+    }
+
+    pub fn tap_hold(&self) -> TapHold {
+        let p = self.payload();
+        TapHold {
+            tap_keycode: p[0],
+            hold_keycode: p[1],
+            tapping_term: u16::from_le_bytes([p[2], p[3]]),
+            hold_on_other_key_press: p[4] != 0,
+        }
+    }
+
+    pub fn toggle(&self) -> Toggle {
+        let p = self.payload();
+        Toggle {
+            keycode: p[0],
+            tapping_term: u16::from_le_bytes([p[1], p[2]]),
+        }
+    }
+
+    pub fn macro_head(&self) -> u8 {
+        self.payload()[0]
+    }
+
+    pub fn to_owned(&self) -> AdvancedKey<MAX_BINDINGS> {
+        AdvancedKey::from_bytes(self.bytes)
     }
 }
 

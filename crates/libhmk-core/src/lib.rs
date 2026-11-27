@@ -313,4 +313,221 @@ mod tests {
         };
         assert_eq!(Actuation::from_bytes(&act.to_bytes()), act);
     }
+
+    // ---- Regression tests for the optimized hot paths ----
+
+    static KEYMAPS_ABCD: [u8; 16] = [
+        KC_A, KC_B, KC_C, KC_D, KC_NO, KC_NO, KC_NO, KC_NO, // profile 0
+        KC_A, KC_B, KC_C, KC_D, KC_NO, KC_NO, KC_NO, KC_NO, // profile 1
+    ];
+
+    fn test_defaults() -> EeconfigDefaults<'static> {
+        EeconfigDefaults {
+            calibration: Calibration {
+                initial_rest_value: 2000,
+                initial_bottom_out_threshold: 800,
+            },
+            actuation_point: 128,
+            default_keymaps: &KEYMAPS_ABCD,
+        }
+    }
+
+    fn test_firmware(flash: &mut MemFlash) -> Firmware<4, 2, 4, 4, 1024, 4096> {
+        let layout_cfg = EeconfigLayout {
+            num_profiles: 2,
+            num_layers: 2,
+            num_keys: 4,
+            num_advanced_keys: 4,
+            num_dks_max_bindings: 4,
+            num_macro_nodes: 16,
+        };
+        let mut fw = Firmware::new(layout_cfg, 12, false);
+        assert!(fw.init(flash, &test_defaults()));
+        fw
+    }
+
+    /// Straight port of C `matrix_scan()` (state per key) used as the reference model.
+    #[derive(Clone, Copy, Default, Debug, PartialEq)]
+    struct RefKey {
+        filtered: u16,
+        rest: u16,
+        bottom: u16,
+        distance: u8,
+        extremum: u8,
+        dir: u8, // 0 inactive, 1 down, 2 up
+        pressed: bool,
+    }
+
+    fn ref_scan(k: &mut RefKey, raw: u16, act: Actuation) {
+        let filtered = ((raw as u32 + k.filtered as u32 * 15) >> 4) as u16;
+        k.filtered = filtered;
+        if filtered as u32 >= k.bottom as u32 + 5 {
+            k.bottom = filtered;
+        }
+        k.distance = distance::adc_to_distance(filtered, k.rest, k.bottom);
+        let d = k.distance as u32;
+        let e = k.extremum as u32;
+        if act.rt_down == 0 {
+            k.dir = 0;
+            k.pressed = k.distance >= act.actuation_point;
+            return;
+        }
+        let reset = if act.continuous { 0 } else { act.actuation_point } as u32;
+        let rt_up = if act.rt_up == 0 { act.rt_down } else { act.rt_up } as u32;
+        match k.dir {
+            0 => {
+                if d > act.actuation_point as u32 {
+                    k.extremum = k.distance;
+                    k.dir = 1;
+                    k.pressed = true;
+                }
+            }
+            1 => {
+                if d <= reset {
+                    k.extremum = k.distance;
+                    k.dir = 0;
+                    k.pressed = false;
+                } else if d + rt_up < e {
+                    k.extremum = k.distance;
+                    k.dir = 2;
+                    k.pressed = false;
+                } else if d > e {
+                    k.extremum = k.distance;
+                }
+            }
+            _ => {
+                if d <= reset {
+                    k.extremum = k.distance;
+                    k.dir = 0;
+                    k.pressed = false;
+                } else if e + (act.rt_down as u32) < d {
+                    k.extremum = k.distance;
+                    k.dir = 1;
+                    k.pressed = true;
+                } else if d < e {
+                    k.extremum = k.distance;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_scan_matches_c_reference() {
+        let mut flash = MemFlash::new();
+        let mut fw = test_firmware(&mut flash);
+        let acts = [
+            Actuation { actuation_point: 128, rt_down: 0, rt_up: 0, continuous: false },
+            Actuation { actuation_point: 60, rt_down: 20, rt_up: 0, continuous: false },
+            Actuation { actuation_point: 40, rt_down: 10, rt_up: 30, continuous: false },
+            Actuation { actuation_point: 90, rt_down: 5, rt_up: 5, continuous: true },
+        ];
+        for (k, &a) in acts.iter().enumerate() {
+            assert!(fw.eeconfig.set_actuation(&mut flash, 0, k, a));
+        }
+
+        let mut analog = MockAnalog { samples: [2000; 4] };
+        fw.matrix.begin_recalibrate(&mut fw.eeconfig, &mut flash, false);
+        for _ in 0..64 {
+            fw.matrix.calibrate_step(&analog, &fw.eeconfig);
+        }
+        let mut reference: [RefKey; 4] = core::array::from_fn(|k| {
+            let s = fw.matrix.keys[k];
+            RefKey {
+                filtered: s.adc_filtered,
+                rest: s.adc_rest_value,
+                bottom: s.adc_bottom_out_value,
+                ..Default::default()
+            }
+        });
+
+        // Deterministic pseudo-random travel (xorshift), including over-travel past bottom-out
+        let mut seed = 0x1234_5678u32;
+        let mut pos = [0i32; 4];
+        let mut presses = 0;
+        for _ in 0..20_000 {
+            for k in 0..4 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                pos[k] = (pos[k] + (seed % 161) as i32 - 80).clamp(-50, 1000);
+                analog.samples[k] = (2000 + pos[k]) as u16;
+            }
+            fw.matrix.scan(&analog, &fw.eeconfig);
+            for k in 0..4 {
+                ref_scan(&mut reference[k], analog.samples[k], acts[k]);
+                let s = fw.matrix.keys[k];
+                let got = RefKey {
+                    filtered: s.adc_filtered,
+                    rest: s.adc_rest_value,
+                    bottom: s.adc_bottom_out_value,
+                    distance: s.distance,
+                    extremum: s.extremum,
+                    dir: s.key_dir as u8,
+                    pressed: s.is_pressed,
+                };
+                assert_eq!(got, reference[k], "key {k} diverged from the C reference");
+                presses += s.is_pressed as u32;
+            }
+        }
+        assert!(presses > 1000, "test input never actuated keys");
+    }
+
+    #[test]
+    fn advanced_key_view_matches_owned_decode() {
+        let mut bytes = [0u8; types::AdvancedKey::<4>::WIRE_SIZE];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        bytes[2] = types::AdvancedKeyType::TapHold as u8;
+        let owned = types::AdvancedKey::<4>::from_bytes(&bytes);
+        let view = types::AdvancedKeyRef::<4>::new(&bytes);
+        assert_eq!(view.layer(), owned.layer);
+        assert_eq!(view.key(), owned.key);
+        assert_eq!(view.kind(), owned.kind());
+        assert_eq!(view.null_bind(), owned.null_bind());
+        assert_eq!(view.tap_hold(), owned.tap_hold());
+        assert_eq!(view.toggle(), owned.toggle());
+        assert_eq!(view.dynamic_keystroke(), owned.dynamic_keystroke());
+        assert_eq!(view.macro_head(), owned.macro_head());
+        assert_eq!(view.to_owned(), owned);
+    }
+
+    #[test]
+    fn layout_reports_simultaneous_presses_and_releases() {
+        let mut flash = MemFlash::new();
+        let mut fw = test_firmware(&mut flash);
+        let mut board = MockBoard { now: 0 };
+        let mut ble = NoopBleControl;
+        let mut analog = MockAnalog { samples: [2000; 4] };
+        fw.matrix.begin_recalibrate(&mut fw.eeconfig, &mut flash, false);
+        for _ in 0..64 {
+            fw.matrix.calibrate_step(&analog, &fw.eeconfig);
+        }
+
+        let expected: [u8; 4] = [KC_A, KC_B, KC_C, KC_D].map(|kc| keycode_to_hid(kc) as u8);
+        let mut last_kb = None;
+        analog.samples = [2900; 4];
+        for _ in 0..64 {
+            board.now += 1;
+            if let Some(kb) = fw.step(&analog, &mut flash, &mut board, &mut ble).hid.keyboard {
+                last_kb = Some(kb);
+            }
+        }
+        let kb = last_kb.expect("no keyboard report for presses");
+        let mut got: [u8; 4] = [kb.keycodes[0], kb.keycodes[1], kb.keycodes[2], kb.keycodes[3]];
+        got.sort_unstable();
+        let mut want = expected;
+        want.sort_unstable();
+        assert_eq!(got, want);
+
+        analog.samples = [2000; 4];
+        let mut released = false;
+        for _ in 0..64 {
+            board.now += 1;
+            if let Some(kb) = fw.step(&analog, &mut flash, &mut board, &mut ble).hid.keyboard {
+                released = kb.keycodes.iter().all(|&k| k == 0);
+            }
+        }
+        assert!(released, "keys were not released");
+    }
 }

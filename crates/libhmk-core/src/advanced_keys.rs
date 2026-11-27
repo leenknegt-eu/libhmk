@@ -215,17 +215,17 @@ impl<const NUM_AK: usize, const MAX_BINDINGS: usize> AdvancedKeyEngine<NUM_AK, M
             match (ak.kind(), &mut self.states[i]) {
                 (AdvancedKeyType::TapHold, AkState::TapHold(st)) => {
                     if st.stage == TapHoldStage::Hold {
-                        emit.unregister(ak.key, ak.tap_hold().hold_keycode);
+                        emit.unregister(ak.key(), ak.tap_hold().hold_keycode);
                     }
                 }
                 (AdvancedKeyType::Toggle, AkState::Toggle(st)) => {
                     if st.stage != ToggleStage::None || st.is_toggled {
-                        emit.unregister(ak.key, ak.toggle().keycode);
+                        emit.unregister(ak.key(), ak.toggle().keycode);
                     }
                 }
                 (AdvancedKeyType::Macro, AkState::Macro(st)) => {
                     for j in 0..st.num_active {
-                        emit.unregister(ak.key, st.active_keycodes[j]);
+                        emit.unregister(ak.key(), st.active_keycodes[j]);
                     }
                     st.reset();
                 }
@@ -254,7 +254,7 @@ impl<const NUM_AK: usize, const MAX_BINDINGS: usize> AdvancedKeyEngine<NUM_AK, M
         match (ak.kind(), &mut self.states[event.ak_index]) {
             (AdvancedKeyType::NullBind, AkState::NullBind(st)) => {
                 let nb = ak.null_bind();
-                let keys = [ak.key, nb.secondary_key];
+                let keys = [ak.key(), nb.secondary_key];
                 let idx = if event.key == keys[0] { 0 } else { 1 };
 
                 match event.kind {
@@ -479,6 +479,12 @@ impl<const NUM_AK: usize, const MAX_BINDINGS: usize> AdvancedKeyEngine<NUM_AK, M
     ) {
         let profile = ee.current_profile() as usize;
         for i in 0..NUM_AK {
+            // Only tap-hold, toggle and running macros have time-based behavior.
+            match &self.states[i] {
+                AkState::TapHold(_) | AkState::Toggle(_) => {}
+                AkState::Macro(st) if st.current_node != MACRO_NODE_NONE => {}
+                _ => continue,
+            }
             let ak = ee.advanced_key::<MAX_BINDINGS>(profile, i);
             match (ak.kind(), &mut self.states[i]) {
                 (AdvancedKeyType::TapHold, AkState::TapHold(st)) => {
@@ -487,7 +493,7 @@ impl<const NUM_AK: usize, const MAX_BINDINGS: usize> AdvancedKeyEngine<NUM_AK, M
                         && ((has_non_tap_hold_press && th.hold_on_other_key_press)
                             || now_ms.wrapping_sub(st.since) >= th.tapping_term as u32)
                     {
-                        emit.register(ak.key, th.hold_keycode);
+                        emit.register(ak.key(), th.hold_keycode);
                         st.stage = TapHoldStage::Hold;
                     }
                 }
@@ -511,16 +517,16 @@ impl<const NUM_AK: usize, const MAX_BINDINGS: usize> AdvancedKeyEngine<NUM_AK, M
                                 if st.deferred_tap_ticks > 0 {
                                     st.deferred_tap_ticks -= 1;
                                     if st.deferred_tap_ticks == 0 {
-                                        emit.unregister(ak.key, node.keycode);
+                                        emit.unregister(ak.key(), node.keycode);
                                         st.remove_active(node.keycode);
                                     }
                                 } else if elapsed {
-                                    Self::macro_run_step(st, ak.key, node.next, now_ms, ee, emit);
+                                    Self::macro_run_step(st, ak.key(), node.next, now_ms, ee, emit);
                                 }
                             }
                             MacroAction::Press | MacroAction::Release => {
                                 if elapsed {
-                                    Self::macro_run_step(st, ak.key, node.next, now_ms, ee, emit);
+                                    Self::macro_run_step(st, ak.key(), node.next, now_ms, ee, emit);
                                 }
                             }
                             MacroAction::None => {}

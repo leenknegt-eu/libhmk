@@ -24,6 +24,8 @@ pub struct LayoutEngine<
     last_ak_tick: u32,
     key_disabled: [bool; NUM_KEYS],
     key_press_states: [bool; NUM_KEYS],
+    /// Scratch flags of keys with pending events for the current [`Self::task`] call.
+    pending_events: [bool; NUM_KEYS],
     active_keycodes: [u8; NUM_KEYS],
     advanced_key_indices: [[u8; NUM_KEYS]; NUM_LAYERS],
     active_advanced_keys: [u8; NUM_KEYS],
@@ -46,6 +48,7 @@ impl<
             last_ak_tick: 0,
             key_disabled: [false; NUM_KEYS],
             key_press_states: [false; NUM_KEYS],
+            pending_events: [false; NUM_KEYS],
             active_keycodes: [0; NUM_KEYS],
             advanced_key_indices: [[0; NUM_KEYS]; NUM_LAYERS],
             active_advanced_keys: [0; NUM_KEYS],
@@ -61,16 +64,16 @@ impl<
         for i in 0..NUM_AK {
             let ak = ee.advanced_key::<MAX_BINDINGS>(profile, i);
             if ak.kind() == AdvancedKeyType::None
-                || (ak.layer as usize) >= NUM_LAYERS
-                || (ak.key as usize) >= NUM_KEYS
+                || (ak.layer() as usize) >= NUM_LAYERS
+                || (ak.key() as usize) >= NUM_KEYS
             {
                 continue;
             }
-            self.advanced_key_indices[ak.layer as usize][ak.key as usize] = (i + 1) as u8;
+            self.advanced_key_indices[ak.layer() as usize][ak.key() as usize] = (i + 1) as u8;
             if ak.kind() == AdvancedKeyType::NullBind {
                 let sec = ak.null_bind().secondary_key as usize;
                 if sec < NUM_KEYS {
-                    self.advanced_key_indices[ak.layer as usize][sec] = (i + 1) as u8;
+                    self.advanced_key_indices[ak.layer() as usize][sec] = (i + 1) as u8;
                 }
             }
         }
@@ -117,6 +120,114 @@ impl<
         ee.keymap_keycode(profile, self.default_layer as usize, key)
     }
 
+    /// Press / release / hold handling for one key (kept out of the per-key scan loop so
+    /// the common no-change path stays small). Returns whether a non-tap-hold key was pressed.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn key_event<
+        F: FlashStorage,
+        B: BoardControl,
+        BL: BleControl,
+        const VS: usize,
+        const WL: usize,
+    >(
+        &mut self,
+        i: usize,
+        is_pressed: bool,
+        last_pressed: bool,
+        now_ms: u32,
+        current_layer: u8,
+        ee: &mut Eeconfig<VS, WL>,
+        flash: &mut F,
+        matrix: &mut Matrix<NUM_KEYS>,
+        hid: &mut HidState,
+        board: &mut B,
+        ble: &mut BL,
+    ) -> bool {
+        let mut has_non_tap_hold_press = false;
+        if is_pressed && !last_pressed {
+            ble.notify_activity();
+            let keycode = self.resolve_keycode(ee, current_layer, i);
+            let ak_index = self.advanced_key_indices[current_layer as usize][i];
+            if ak_index != 0 {
+                self.active_advanced_keys[i] = ak_index;
+                let idx = (ak_index - 1) as usize;
+                let mut emit = ActionEmitter::new();
+                self.advanced_keys.process(
+                    AkEvent {
+                        kind: AkEventType::Press,
+                        key: i as u8,
+                        keycode,
+                        ak_index: idx,
+                    },
+                    now_ms,
+                    ee,
+                    matrix,
+                    &mut self.deferred,
+                    &mut emit,
+                );
+                self.apply_actions(&emit, ee, flash, hid, board, ble);
+                let ak_kind = ee
+                    .advanced_key::<MAX_BINDINGS>(ee.current_profile() as usize, idx)
+                    .kind();
+                if ak_kind != AdvancedKeyType::TapHold {
+                    has_non_tap_hold_press = true;
+                }
+            } else {
+                self.active_keycodes[i] = keycode;
+                self.register(i as u8, keycode, ee, flash, hid, board, ble);
+                if keycode != KC_NO {
+                    has_non_tap_hold_press = true;
+                }
+            }
+        } else if !is_pressed && last_pressed {
+            ble.notify_activity();
+            let keycode = self.active_keycodes[i];
+            let ak_index = self.active_advanced_keys[i];
+            if ak_index != 0 {
+                self.active_advanced_keys[i] = 0;
+                let mut emit = ActionEmitter::new();
+                self.advanced_keys.process(
+                    AkEvent {
+                        kind: AkEventType::Release,
+                        key: i as u8,
+                        keycode,
+                        ak_index: (ak_index - 1) as usize,
+                    },
+                    now_ms,
+                    ee,
+                    matrix,
+                    &mut self.deferred,
+                    &mut emit,
+                );
+                self.apply_actions(&emit, ee, flash, hid, board, ble);
+            } else {
+                self.active_keycodes[i] = KC_NO;
+                self.unregister(keycode, hid);
+            }
+        } else if is_pressed {
+            let ak_index = self.active_advanced_keys[i];
+            if ak_index != 0 {
+                let mut emit = ActionEmitter::new();
+                self.advanced_keys.process(
+                    AkEvent {
+                        kind: AkEventType::Hold,
+                        key: i as u8,
+                        keycode: self.active_keycodes[i],
+                        ak_index: (ak_index - 1) as usize,
+                    },
+                    now_ms,
+                    ee,
+                    matrix,
+                    &mut self.deferred,
+                    &mut emit,
+                );
+                self.apply_actions(&emit, ee, flash, hid, board, ble);
+            }
+        }
+        has_non_tap_hold_press
+    }
+
     /// Run one layout scan iteration and return any changed HID reports to transmit.
     #[allow(clippy::too_many_arguments)]
     pub fn task<
@@ -142,109 +253,69 @@ impl<
         let gp_opts = ee.gamepad_options(profile);
         let mut has_non_tap_hold_press = false;
 
+        // Pass 1 (hot, call-free except XInput): find keys with a press/release edge or an
+        // active advanced key that needs hold events.
+        let gamepad_buttons = if current_layer == 0 && xinput_enabled {
+            Some(ee.gamepad_buttons(profile))
+        } else {
+            None
+        };
+        let mut num_events = 0usize;
         for i in 0..NUM_KEYS {
-            let k = matrix.keys[i];
-            let last_pressed = self.key_press_states[i];
+            let k = &matrix.keys[i];
+            let mut has_event = false;
 
-            if current_layer == 0 && xinput_enabled {
-                let gp_btn = ee.gamepad_button(profile, i);
+            if let Some(buttons) = gamepad_buttons {
+                let gp_btn = buttons.get(i).copied().unwrap_or(GamepadButton::None as u8);
                 if gp_btn != GamepadButton::None as u8 {
-                    xinput.process_key(i, &k, gp_btn);
+                    xinput.process_key(i, k, gp_btn);
                     if gp_opts.gamepad_override() {
+                        self.pending_events[i] = false;
                         continue;
                     }
                 }
                 if !gp_opts.keyboard_enabled() {
+                    self.pending_events[i] = false;
                     continue;
                 }
             }
 
-            if current_layer == 0 && self.key_disabled[i] {
-                continue;
+            if !(current_layer == 0 && self.key_disabled[i]) {
+                let last_pressed = self.key_press_states[i];
+                has_event = k.is_pressed != last_pressed
+                    || (k.is_pressed && self.active_advanced_keys[i] != 0);
             }
+            self.pending_events[i] = has_event;
+            num_events += has_event as usize;
+        }
 
-            if k.is_pressed && !last_pressed {
-                ble.notify_activity();
-                let keycode = self.resolve_keycode(ee, current_layer, i);
-                let ak_index = self.advanced_key_indices[current_layer as usize][i];
-                if ak_index != 0 {
-                    self.active_advanced_keys[i] = ak_index;
-                    let idx = (ak_index - 1) as usize;
-                    let mut emit = ActionEmitter::new();
-                    self.advanced_keys.process(
-                        AkEvent {
-                            kind: AkEventType::Press,
-                            key: i as u8,
-                            keycode,
-                            ak_index: idx,
-                        },
-                        now_ms,
-                        ee,
-                        matrix,
-                        &mut self.deferred,
-                        &mut emit,
-                    );
-                    self.apply_actions(&emit, ee, flash, hid, board, ble);
-                    let ak_kind = ee
-                        .advanced_key::<MAX_BINDINGS>(ee.current_profile() as usize, idx)
-                        .kind();
-                    if ak_kind != AdvancedKeyType::TapHold {
-                        has_non_tap_hold_press = true;
-                    }
-                } else {
-                    self.active_keycodes[i] = keycode;
-                    self.register(i as u8, keycode, ee, flash, hid, board, ble);
-                    if keycode != KC_NO {
-                        has_non_tap_hold_press = true;
-                    }
+        // Pass 2: dispatch events in key order (rare; kept out of the scan loop).
+        if num_events > 0 {
+            for i in 0..NUM_KEYS {
+                if !self.pending_events[i] {
+                    continue;
                 }
-            } else if !k.is_pressed && last_pressed {
-                ble.notify_activity();
-                let keycode = self.active_keycodes[i];
-                let ak_index = self.active_advanced_keys[i];
-                if ak_index != 0 {
-                    self.active_advanced_keys[i] = 0;
-                    let mut emit = ActionEmitter::new();
-                    self.advanced_keys.process(
-                        AkEvent {
-                            kind: AkEventType::Release,
-                            key: i as u8,
-                            keycode,
-                            ak_index: (ak_index - 1) as usize,
-                        },
-                        now_ms,
-                        ee,
-                        matrix,
-                        &mut self.deferred,
-                        &mut emit,
-                    );
-                    self.apply_actions(&emit, ee, flash, hid, board, ble);
-                } else {
-                    self.active_keycodes[i] = KC_NO;
-                    self.unregister(keycode, hid);
+                // A key-lock toggled by an earlier key in this pass still applies.
+                if current_layer == 0 && self.key_disabled[i] {
+                    continue;
                 }
-            } else if k.is_pressed {
-                let ak_index = self.active_advanced_keys[i];
-                if ak_index != 0 {
-                    let mut emit = ActionEmitter::new();
-                    self.advanced_keys.process(
-                        AkEvent {
-                            kind: AkEventType::Hold,
-                            key: i as u8,
-                            keycode: self.active_keycodes[i],
-                            ak_index: (ak_index - 1) as usize,
-                        },
-                        now_ms,
-                        ee,
-                        matrix,
-                        &mut self.deferred,
-                        &mut emit,
-                    );
-                    self.apply_actions(&emit, ee, flash, hid, board, ble);
-                }
+                let is_pressed = matrix.keys[i].is_pressed;
+                let last_pressed = self.key_press_states[i];
+                has_non_tap_hold_press |= self.key_event(
+                    i,
+                    is_pressed,
+                    last_pressed,
+                    now_ms,
+                    current_layer,
+                    ee,
+                    flash,
+                    matrix,
+                    hid,
+                    board,
+                    ble,
+                );
+                self.key_press_states[i] = is_pressed;
             }
-
-            self.key_press_states[i] = k.is_pressed;
         }
 
         if has_non_tap_hold_press || now_ms.wrapping_sub(self.last_ak_tick) > 0 {

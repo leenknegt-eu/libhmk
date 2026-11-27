@@ -3,6 +3,7 @@
 use crate::distance::adc_to_distance;
 use crate::eeconfig::Eeconfig;
 use crate::traits::{AnalogInput, FlashStorage};
+use crate::types::Actuation;
 
 pub const MATRIX_CALIBRATION_DURATION_MS: u32 = 500;
 pub const MATRIX_EMA_ALPHA_EXPONENT: u32 = 4;
@@ -135,10 +136,18 @@ impl<const NUM_KEYS: usize> Matrix<NUM_KEYS> {
         ee: &Eeconfig<VS, WL>,
     ) {
         let profile = ee.current_profile() as usize;
-        for k in 0..NUM_KEYS {
-            let new_filtered = ema(self.read_adc(analog, k), self.keys[k].adc_filtered);
-            let act = ee.actuation(profile, k);
-            let state = &mut self.keys[k];
+        // One bounds check for the whole profile instead of one slice per key.
+        let (actuations, _) = ee.actuation_map(profile).as_chunks::<{ Actuation::SIZE }>();
+        let keys = self
+            .keys
+            .iter_mut()
+            .zip(self.rapid_trigger_disabled.iter())
+            .zip(actuations.iter());
+        for (k, ((state, &rt_disabled), act)) in keys.enumerate() {
+            let raw = analog.read_raw(k).min(self.adc_max_value);
+            let raw = if self.invert_adc { self.adc_max_value - raw } else { raw };
+            let new_filtered = ema(raw, state.adc_filtered);
+            let act = Actuation::from_array(*act);
 
             state.adc_filtered = new_filtered;
             if new_filtered
@@ -155,7 +164,7 @@ impl<const NUM_KEYS: usize> Matrix<NUM_KEYS> {
                 state.adc_bottom_out_value,
             );
 
-            if self.rapid_trigger_disabled[k] || act.rt_down == 0 {
+            if rt_disabled || act.rt_down == 0 {
                 state.key_dir = KeyDir::Inactive;
                 state.is_pressed = state.distance >= act.actuation_point;
             } else {
