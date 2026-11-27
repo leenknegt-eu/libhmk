@@ -20,7 +20,19 @@ A pure-Rust `#![no_std]` Hall-effect keyboard firmware workspace built on **Emba
 | [`crates/libhmk-config`](crates/libhmk-config) | Host (`build.rs`) | Validates `keyboards/*/keyboard.json`, compresses `hmkconf` metadata, and generates `keyboard_gen.rs` + `memory.x` |
 | [`crates/libhmk-nrf52840`](crates/libhmk-nrf52840) | `thumbv7em-none-eabihf` | Nordic nRF52840 firmware (`embassy-nrf`, `embassy-usb`, `trouble-host`, `nrf-sdc`) |
 | [`crates/libhmk-stm32f446`](crates/libhmk-stm32f446) | `thumbv7em-none-eabihf` | STM32F446xx firmware (`embassy-stm32`, `embassy-usb`) |
-| [`crates/libhmk-at32f405`](crates/libhmk-at32f405) | `thumbv7em-none-eabihf` | Artery AT32F405xx bare-metal firmware (`at32f4xx-pac`, `cortex-m-rt`) |
+| [`crates/libhmk-at32f405`](crates/libhmk-at32f405) | `thumbv7em-none-eabihf` | Artery AT32F405xx firmware (`at32f4xx-pac`, Embassy executor + TMR2 time driver, `embassy-usb-synopsys-otg` on OTGFS1/OTGHS) |
+
+## Scan Pipeline
+
+ADC sampling never blocks the keyboard loop. Each firmware samples the matrix in the background and publishes the latest value per key through lock-free atomics. The main loop runs matrix scan, layout and XInput back to back, the same way the C superloop does:
+
+| MCU | Sampling | Main loop |
+| --- | --- | --- |
+| STM32F446 | Scanner task on a high-priority `InterruptExecutor`: mux settle via `Timer` (yields), short blocking conversions | free-running, `yield_now()` between iterations |
+| AT32F405 | Interrupt driven, as in the C firmware: ADC sequence → DMA1 full-transfer IRQ (store, advance mux) → TMR6 settle delay → next conversion | free-running, `yield_now()` between iterations |
+| nRF52840 | Async SAADC task (3 µs acquisition); battery measured every 10 s with its own channel config | free-running on USB power; on battery sleeps until the next scan pass (Active/Idle/Sleep throttling) |
+
+ADC inputs and mux select pins come from `keyboards/*/keyboard.json`. Each firmware's `build.rs` generates the peripheral bindings (`pins_gen.rs`).
 
 ## Prerequisites
 
@@ -36,6 +48,8 @@ A pure-Rust `#![no_std]` Hall-effect keyboard firmware workspace built on **Emba
 ```bash
 cargo test
 ```
+
+The core tests include a model check of `Matrix::scan` against a port of the C `matrix_scan()` (Rapid Trigger, continuous RT, asymmetric `rt_up`) over 20k randomized ticks.
 
 ### Build firmware for a specific keyboard
 Select any keyboard under `keyboards/` via `LIBHMK_KEYBOARD`:

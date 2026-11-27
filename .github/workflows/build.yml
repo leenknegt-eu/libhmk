@@ -5,27 +5,21 @@ on:
   pull_request:
     branches: [main, dev]
     paths:
-      - "setup.py"
-      - "requirements.txt"
-      - "hardware/**"
-      - "include/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/**"
       - "keyboards/**"
-      - "linker/**"
-      - "scripts/**"
-      - "src/**"
       - ".github/workflows/build.yml"
       - ".github/workflows/ci_define_matrix.py"
   push:
     branches: [main, dev]
     paths:
-      - "setup.py"
-      - "requirements.txt"
-      - "hardware/**"
-      - "include/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/**"
       - "keyboards/**"
-      - "linker/**"
-      - "scripts/**"
-      - "src/**"
       - ".github/workflows/build.yml"
       - ".github/workflows/ci_define_matrix.py"
     tags: ["v*"]
@@ -33,7 +27,29 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  test:
+    name: Host Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout libhmk
+        uses: actions/checkout@v6
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-host-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test --locked
+
   define-matrix:
     name: Define Action Matrix
     runs-on: ubuntu-latest
@@ -52,7 +68,7 @@ jobs:
 
   build:
     name: Build Firmware
-    needs: define-matrix
+    needs: [test, define-matrix]
     strategy:
       matrix:
         include: ${{ fromJson(needs.define-matrix.outputs.matrix) }}
@@ -61,40 +77,39 @@ jobs:
       - name: Checkout libhmk
         uses: actions/checkout@v6
 
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
+      - name: Install Rust target
+        run: rustup target add thumbv7em-none-eabihf && rustup component add llvm-tools
 
-      - name: Setup PlatformIO Cache
+      - name: Cache Cargo
         uses: actions/cache@v5
         with:
           path: |
-            ~/.cache/pip
-            ~/.platformio/.cache
-          key: ${{ runner.os }}-pio
-
-      - name: Install Python Dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install PlatformIO Core
-        run: pip install --upgrade platformio
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build ${{ matrix.keyboard }}
+        env:
+          LIBHMK_KEYBOARD: ${{ matrix.keyboard }}
         run: |
-          python setup.py -k ${{ matrix.keyboard }}
-          pio run
+          cargo build --locked --release -p ${{ matrix.crate }} --target thumbv7em-none-eabihf
+          ELF=target/thumbv7em-none-eabihf/release/${{ matrix.crate }}
+          OBJCOPY=$(find "$(rustc --print sysroot)" -name llvm-objcopy -type f | head -n1)
+          mkdir -p dist
+          cp "$ELF" dist/firmware.elf
+          "$OBJCOPY" -O binary "$ELF" dist/firmware.bin
 
       - name: Archive Firmware Artifact
         uses: actions/upload-artifact@v7
         with:
           name: firmware-${{ matrix.keyboard }}
           path: |
-            .pio/build/${{ matrix.keyboard }}/firmware.bin
-            .pio/build/${{ matrix.keyboard }}/firmware.elf
+            dist/firmware.bin
+            dist/firmware.elf
 
   release:
-    name: Create Releast Draft
+    name: Create Release Draft
     if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
