@@ -1,0 +1,27 @@
+[package]
+name = "libhmk-stm32f446"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embassy-STM32 Hall-effect keyboard firmware for STM32F446xx"
+
+[build-dependencies]
+libhmk-config = { workspace = true }
+
+[dependencies]
+libhmk-core = { workspace = true, features = ["defmt"] }
+
+cortex-m = { workspace = true, features = ["critical-section-single-core"] }
+cortex-m-rt = { workspace = true }
+embedded-storage = { workspace = true }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+panic-probe = { workspace = true }
+static_cell = { workspace = true }
+
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-stm32 = { workspace = true, features = ["defmt", "stm32f446re", "time-driver-any", "exti", "memory-x"] }
+embassy-usb = { workspace = true, features = ["defmt"] }

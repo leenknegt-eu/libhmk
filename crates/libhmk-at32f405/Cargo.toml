@@ -1,0 +1,20 @@
+[package]
+name = "libhmk-at32f405"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bare-metal at32f4xx-pac Hall-effect keyboard firmware for Artery AT32F405xx"
+
+[build-dependencies]
+libhmk-config = { workspace = true }
+
+[dependencies]
+libhmk-core = { workspace = true, features = ["defmt"] }
+
+at32f4xx-pac = { workspace = true, features = ["at32f405", "rt"] }
+cortex-m = { workspace = true, features = ["critical-section-single-core"] }
+cortex-m-rt = { workspace = true }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+panic-probe = { workspace = true }
+static_cell = { workspace = true }

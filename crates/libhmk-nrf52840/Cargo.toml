@@ -1,0 +1,32 @@
+[package]
+name = "libhmk-nrf52840"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embassy + TrouBLE BLE + USB Hall-effect keyboard firmware for Nordic nRF52840"
+
+[build-dependencies]
+libhmk-config = { workspace = true }
+
+[dependencies]
+libhmk-core = { workspace = true, features = ["defmt"] }
+
+cortex-m = { workspace = true }
+cortex-m-rt = { workspace = true }
+embedded-storage = { workspace = true }
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+panic-probe = { workspace = true }
+static_cell = { workspace = true }
+
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-nrf = { workspace = true, features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "rt"] }
+embassy-usb = { workspace = true, features = ["defmt"] }
+
+bt-hci = { workspace = true, features = ["defmt"] }
+nrf-sdc = { workspace = true, features = ["defmt", "nrf52840", "peripheral"] }
+nrf-mpsl = { workspace = true, features = ["defmt", "critical-section-impl"] }
+trouble-host = { workspace = true, features = ["defmt", "derive", "gatt", "peripheral", "default-packet-pool"] }
