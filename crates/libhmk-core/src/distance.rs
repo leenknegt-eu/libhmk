@@ -75,7 +75,7 @@ pub static DISTANCE_LUT: [u8; DISTANCE_LUT_SIZE] = [
 ];
 
 /// Convert a filtered ADC value to travel distance in `0..=255`.
-#[inline]
+#[inline(always)]
 pub fn adc_to_distance(adc: u16, adc_rest_value: u16, adc_bottom_out_value: u16) -> u8 {
     if adc <= adc_rest_value || adc_rest_value >= adc_bottom_out_value {
         return 0;
@@ -85,7 +85,7 @@ pub fn adc_to_distance(adc: u16, adc_rest_value: u16, adc_bottom_out_value: u16)
     }
     let normalized = ((adc - adc_rest_value) as u32 * (DISTANCE_LUT_SIZE as u32 - 1))
         / (adc_bottom_out_value - adc_rest_value) as u32;
-    // `adc < adc_bottom_out_value` implies `normalized < DISTANCE_LUT_SIZE - 1`; the clamp
-    // lets the compiler drop the bounds check.
-    DISTANCE_LUT[(normalized as usize).min(DISTANCE_LUT_SIZE - 1)]
+    // `adc < adc_bottom_out_value` implies `normalized < DISTANCE_LUT_SIZE - 1`; the
+    // mask (an identity here) lets the compiler drop the bounds check.
+    DISTANCE_LUT[normalized as usize & (DISTANCE_LUT_SIZE - 1)]
 }

@@ -35,6 +35,71 @@ fn ema(x: u16, y: u16) -> u16 {
     (num >> MATRIX_EMA_ALPHA_EXPONENT) as u16
 }
 
+/// One Hall-effect key update: EMA filter, bottom-out tracking, distance and Rapid Trigger.
+///
+/// Fields are only stored when they change (like the C firmware), and all comparisons are
+/// done in `u32`, which is exact for the 8-bit distances and <= 16-bit ADC values involved
+/// (matching C integer promotion).
+#[inline(always)]
+fn update_key(s: &mut KeyState, raw: u16, act: Actuation, rt_disabled: bool) {
+    let filtered = ema(raw, s.adc_filtered);
+    s.adc_filtered = filtered;
+    let mut bottom = s.adc_bottom_out_value;
+    if filtered as u32 >= bottom as u32 + MATRIX_CALIBRATION_EPSILON as u32 {
+        bottom = filtered;
+        s.adc_bottom_out_value = bottom;
+    }
+    let d = adc_to_distance(filtered, s.adc_rest_value, bottom);
+    s.distance = d;
+
+    if rt_disabled || act.rt_down == 0 {
+        s.key_dir = KeyDir::Inactive;
+        s.is_pressed = d >= act.actuation_point;
+        return;
+    }
+
+    let d32 = d as u32;
+    let reset_point = if act.continuous { 0 } else { act.actuation_point as u32 };
+    match s.key_dir {
+        KeyDir::Inactive => {
+            if d > act.actuation_point {
+                s.extremum = d;
+                s.key_dir = KeyDir::Down;
+                s.is_pressed = true;
+            }
+        }
+        KeyDir::Down => {
+            let e32 = s.extremum as u32;
+            let rt_up = if act.rt_up == 0 { act.rt_down } else { act.rt_up } as u32;
+            if d32 <= reset_point {
+                s.extremum = d;
+                s.key_dir = KeyDir::Inactive;
+                s.is_pressed = false;
+            } else if d32 + rt_up < e32 {
+                s.extremum = d;
+                s.key_dir = KeyDir::Up;
+                s.is_pressed = false;
+            } else if d32 > e32 {
+                s.extremum = d;
+            }
+        }
+        KeyDir::Up => {
+            let e32 = s.extremum as u32;
+            if d32 <= reset_point {
+                s.extremum = d;
+                s.key_dir = KeyDir::Inactive;
+                s.is_pressed = false;
+            } else if e32 + (act.rt_down as u32) < d32 {
+                s.extremum = d;
+                s.key_dir = KeyDir::Down;
+                s.is_pressed = true;
+            } else if d32 < e32 {
+                s.extremum = d;
+            }
+        }
+    }
+}
+
 pub struct Matrix<const NUM_KEYS: usize> {
     pub keys: [KeyState; NUM_KEYS],
     rapid_trigger_disabled: [bool; NUM_KEYS],
@@ -138,75 +203,17 @@ impl<const NUM_KEYS: usize> Matrix<NUM_KEYS> {
         let profile = ee.current_profile() as usize;
         // One bounds check for the whole profile instead of one slice per key.
         let (actuations, _) = ee.actuation_map(profile).as_chunks::<{ Actuation::SIZE }>();
+        // Hoisted out of the loop: `max - raw == raw ^ max` for `raw <= max = 2^n - 1`.
+        let adc_max = self.adc_max_value;
+        let invert_mask = if self.invert_adc { adc_max } else { 0 };
         let keys = self
             .keys
             .iter_mut()
             .zip(self.rapid_trigger_disabled.iter())
             .zip(actuations.iter());
         for (k, ((state, &rt_disabled), act)) in keys.enumerate() {
-            let raw = analog.read_raw(k).min(self.adc_max_value);
-            let raw = if self.invert_adc { self.adc_max_value - raw } else { raw };
-            let new_filtered = ema(raw, state.adc_filtered);
-            let act = Actuation::from_array(*act);
-
-            state.adc_filtered = new_filtered;
-            if new_filtered
-                >= state
-                    .adc_bottom_out_value
-                    .saturating_add(MATRIX_CALIBRATION_EPSILON)
-            {
-                state.adc_bottom_out_value = new_filtered;
-            }
-
-            state.distance = adc_to_distance(
-                new_filtered,
-                state.adc_rest_value,
-                state.adc_bottom_out_value,
-            );
-
-            if rt_disabled || act.rt_down == 0 {
-                state.key_dir = KeyDir::Inactive;
-                state.is_pressed = state.distance >= act.actuation_point;
-            } else {
-                let reset_point = if act.continuous { 0 } else { act.actuation_point };
-                let rt_up = if act.rt_up == 0 { act.rt_down } else { act.rt_up };
-
-                match state.key_dir {
-                    KeyDir::Inactive => {
-                        if state.distance > act.actuation_point {
-                            state.extremum = state.distance;
-                            state.key_dir = KeyDir::Down;
-                            state.is_pressed = true;
-                        }
-                    }
-                    KeyDir::Down => {
-                        if state.distance <= reset_point {
-                            state.extremum = state.distance;
-                            state.key_dir = KeyDir::Inactive;
-                            state.is_pressed = false;
-                        } else if state.distance.saturating_add(rt_up) < state.extremum {
-                            state.extremum = state.distance;
-                            state.key_dir = KeyDir::Up;
-                            state.is_pressed = false;
-                        } else if state.distance > state.extremum {
-                            state.extremum = state.distance;
-                        }
-                    }
-                    KeyDir::Up => {
-                        if state.distance <= reset_point {
-                            state.extremum = state.distance;
-                            state.key_dir = KeyDir::Inactive;
-                            state.is_pressed = false;
-                        } else if state.extremum.saturating_add(act.rt_down) < state.distance {
-                            state.extremum = state.distance;
-                            state.key_dir = KeyDir::Down;
-                            state.is_pressed = true;
-                        } else if state.distance < state.extremum {
-                            state.extremum = state.distance;
-                        }
-                    }
-                }
-            }
+            let raw = analog.read_raw(k).min(adc_max) ^ invert_mask;
+            update_key(state, raw, Actuation::from_array(*act), rt_disabled);
         }
     }
 
