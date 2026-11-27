@@ -34,6 +34,7 @@ static const uint8_t keyboard_metadata[] = {KEYBOARD_METADATA};
 // `volatile` to prevent compiler optimizations
 static volatile bool command_request_pending;
 static volatile bool command_response_pending;
+static volatile command_transport_t command_transport;
 static uint8_t in_buf[RAW_HID_EP_SIZE];
 static uint8_t out_buf[RAW_HID_EP_SIZE];
 
@@ -163,10 +164,12 @@ fail:
 void command_init(void) {
   command_request_pending = false;
   command_response_pending = false;
+  command_transport = COMMAND_TRANSPORT_USB;
   command_reset_staged_buffer();
 }
 
-bool command_enqueue(const uint8_t *buf, uint16_t len) {
+bool command_enqueue_from(const uint8_t *buf, uint16_t len,
+                          command_transport_t transport) {
   if (len != RAW_HID_EP_SIZE || command_request_pending ||
       command_response_pending)
     // Either `command_request_pending` or `command_response_pending` is set
@@ -174,9 +177,14 @@ bool command_enqueue(const uint8_t *buf, uint16_t len) {
     return false;
 
   memcpy(in_buf, buf, RAW_HID_EP_SIZE);
+  command_transport = transport;
   command_request_pending = true;
 
   return true;
+}
+
+bool command_enqueue(const uint8_t *buf, uint16_t len) {
+  return command_enqueue_from(buf, len, COMMAND_TRANSPORT_USB);
 }
 
 /**
@@ -482,13 +490,28 @@ static void command_process(void) {
 
 void command_task(void) {
   if (command_request_pending) {
+    ble_notify_activity();
     command_process();
     command_request_pending = false;
     command_response_pending = true;
   }
 
-  if (command_response_pending && tud_hid_n_ready(USB_ITF_RAW_HID) &&
-      tud_hid_n_report(USB_ITF_RAW_HID, 0, out_buf, RAW_HID_EP_SIZE))
-    // The command response has been sent, so clear the queue.
-    command_response_pending = false;
+  if (command_response_pending) {
+#if defined(BLUETOOTH_ENABLED)
+    if (command_transport == COMMAND_TRANSPORT_BLE) {
+      if (!ble_is_connected()) {
+        // Peer disconnected before response could be delivered
+        command_response_pending = false;
+      } else if (ble_raw_hid_ready() &&
+                 ble_raw_hid_send(out_buf, RAW_HID_EP_SIZE)) {
+        command_response_pending = false;
+      }
+      return;
+    }
+#endif
+    if (tud_hid_n_ready(USB_ITF_RAW_HID) &&
+        tud_hid_n_report(USB_ITF_RAW_HID, 0, out_buf, RAW_HID_EP_SIZE))
+      // The command response has been sent, so clear the queue.
+      command_response_pending = false;
+  }
 }

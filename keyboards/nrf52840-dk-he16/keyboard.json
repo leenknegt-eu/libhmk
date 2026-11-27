@@ -1,0 +1,124 @@
+{
+  "name": "nRF52840-DK HE16",
+  "manufacturer": "libhmk",
+  "maintainer": "libhmk",
+  "usb": {
+    "vid": "0xAB50",
+    "pid": "0x5284",
+    "port": "fs"
+  },
+  "keyboard": {
+    "num_profiles": 4,
+    "num_layers": 4,
+    "num_keys": 16,
+    "num_advanced_keys": 32
+  },
+  "hardware": {
+    "hse_value": 32000000,
+    "driver": "nrf52840xx"
+  },
+  "bluetooth": {
+    "enabled": true,
+    "device_name": "libhmk nRF52840",
+    "lfclk_source": "xtal",
+    "tx_power": 0,
+    "idle_timeout_ms": 30000,
+    "sleep_timeout_ms": 300000
+  },
+  "analog": {
+    "mux": {
+      "select": ["P0.11", "P0.12", "P0.13"],
+      "input": ["P0.02", "P0.03"],
+      "matrix": [
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [9, 10, 11, 12, 13, 14, 15, 16]
+      ]
+    }
+  },
+  "calibration": {
+    "initial_rest_value": 2400,
+    "initial_bottom_out_threshold": 700
+  },
+  "layout": {
+    "keymap": [
+      [{ "key": 0 }, { "key": 1 }, { "key": 2 }, { "key": 3 }],
+      [{ "key": 4 }, { "key": 5 }, { "key": 6 }, { "key": 7 }],
+      [{ "key": 8 }, { "key": 9 }, { "key": 10 }, { "key": 11 }],
+      [{ "key": 12 }, { "key": 13 }, { "key": 14 }, { "key": 15 }]
+    ]
+  },
+  "keymap": [
+    [
+      "KC_7",
+      "KC_8",
+      "KC_9",
+      "KC_BSPC",
+      "KC_4",
+      "KC_5",
+      "KC_6",
+      "KC_ENTER",
+      "KC_1",
+      "KC_2",
+      "KC_3",
+      "MO(1)",
+      "KC_0",
+      "KC_DOT",
+      "KC_MUTE",
+      "KC_MPLY"
+    ],
+    [
+      "BT_TOGG",
+      "BT_USB",
+      "BT_BLE",
+      "BT_PAIR",
+      "PF_SWAP",
+      "PF_NEXT",
+      "LY_LOCK",
+      "SP_BOOT",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "KC_VOLD",
+      "KC_VOLU"
+    ],
+    [
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______"
+    ],
+    [
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______",
+      "_______"
+    ]
+  ]
+}

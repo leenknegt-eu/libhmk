@@ -47,16 +47,22 @@ int main(void) {
   layout_init();
   command_init();
 
+  // Initialize Bluetooth (if enabled) before TinyUSB
+  ble_init();
+
   tud_init(BOARD_TUD_RHPORT);
 
   while (1) {
     tud_task();
+    ble_task();
 
     command_task();
     analog_task();
     matrix_scan();
     layout_task();
     xinput_task();
+
+    ble_power_manage();
   }
 
   return 0;

@@ -26,6 +26,7 @@ This repository contains libraries for building a Hall-effect keyboard firmware.
 - [x] **Web Configurator**: Configure the firmware using [hmkconf](https://github.com/peppapighs/hmkconf) without needing to recompile the firmware.
 - [x] **Tick Rate**: Customizable tick rate for Tap-Hold and Dynamic Keystroke.
 - [x] **8kHz Polling Rate**: Support for 8kHz polling rate on some microcontrollers (e.g., AT32F405xx).
+- [x] **Bluetooth Low Energy (BLE)**: Dual-mode USB/BLE HID (Keyboard, Consumer, System, Mouse), Raw HID over BLE for web configuration, Battery Service (BAS), and low-power idle/sleep management on Nordic nRF52840 (SoftDevice S140 v7.3.0).
 - [x] **Gamepad**: Support for XInput gamepad mode, allowing the keyboard to be used as a game controller.
 
 ## Limitations

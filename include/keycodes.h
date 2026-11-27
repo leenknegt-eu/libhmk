@@ -203,6 +203,10 @@ typedef enum {
   SP_PROFILE_SWAP = 0xD2,
   SP_PROFILE_NEXT = 0xD3,
   SP_BOOT = 0xD4,
+  SP_BT_TOGGLE = 0xD5,
+  SP_BT_USB = 0xD6,
+  SP_BT_BLE = 0xD7,
+  SP_BT_PAIR = 0xD8,
 
   XXXXXXX = KC_NO,
   _______ = KC_TRANSPARENT,
@@ -311,6 +315,10 @@ typedef enum {
   LY_LOCK = SP_LAYER_LOCK,
   PF_SWAP = SP_PROFILE_SWAP,
   PF_NEXT = SP_PROFILE_NEXT,
+  BT_TOGG = SP_BT_TOGGLE,
+  BT_USB = SP_BT_USB,
+  BT_BLE = SP_BT_BLE,
+  BT_PAIR = SP_BT_PAIR,
 } keycode_t;
 
 // Map keycodes to their corresponding HID codes

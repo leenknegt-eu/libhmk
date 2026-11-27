@@ -22,10 +22,12 @@ class PlatformIO:
     board: str
     # Linker script used for the board
     ldscript: str
-    # PlatformIO framework identifier
-    framework: str
+    # PlatformIO framework identifier (None for bare-metal builds)
+    framework: str | None
     # PlatformIO platform identifier
     platform: str
+    # Default PlatformIO upload protocol
+    upload_protocol: str = "dfu"
 
 
 @dataclass
@@ -235,6 +237,70 @@ AT32F405XX = Driver(
                 [f"GPIO{pin[0]}" for pin in pins],
                 [f"GPIO_PINS_{pin[1:]}" for pin in pins],
             ),
+        ),
+    ),
+)
+
+
+def _nrf52840_to_gpio_array(pins: list[str]) -> tuple[list[str], list[str]]:
+    ports: list[str] = []
+    pin_nums: list[str] = []
+    for pin in pins:
+        if not pin.startswith("P") or "." not in pin:
+            raise ValueError(
+                f"Invalid nRF52840 pin '{pin}': expected format 'P0.00'..'P0.31' or 'P1.00'..'P1.15'"
+            )
+        port_str, num_str = pin[1:].split(".", 1)
+        port = int(port_str)
+        num = int(num_str)
+        if port == 0 and 0 <= num <= 31:
+            ports.append("NRF_P0")
+        elif port == 1 and 0 <= num <= 15:
+            ports.append("NRF_P1")
+        else:
+            raise ValueError(f"Invalid nRF52840 GPIO pin: {pin}")
+        pin_nums.append(f"{num}U")
+    return ports, pin_nums
+
+
+NRF52840XX = Driver(
+    platformio=PlatformIO(
+        board="nrf52840_dk",
+        ldscript="nrf52840xxaa.ld",
+        framework=None,
+        platform="nordicnrf52",
+        upload_protocol="jlink",
+    ),
+    tinyusb=TinyUSB(mcu="nrf5x"),
+    metadata=Metadata(
+        bootloader=Bootloader(
+            # Standard Nordic nRF52840 DFU bootloader region (48 KB reserved at end of 1 MB flash)
+            address=0x000F4000,
+            # Nordic DFU bootloader GPREGRET magic (BOOTLOADER_DFU_START)
+            magic=0xB1,
+        ),
+        flash=Flash(
+            # 244 x 4 KB = 976 KB usable below the 48 KB Nordic DFU/MBR/settings region
+            sector_sizes=UniformSectors(
+                size=4096,
+                num_sectors=244,
+            ),
+            empty_value=0xFFFFFFFF,
+        ),
+        adc=ADC(
+            max_resolution=12,
+            # SAADC AIN0..AIN7 pins on nRF52840
+            input_pins=[
+                "P0.02",
+                "P0.03",
+                "P0.04",
+                "P0.05",
+                "P0.28",
+                "P0.29",
+                "P0.30",
+                "P0.31",
+            ],
+            to_gpio_array=_nrf52840_to_gpio_array,
         ),
     ),
 )

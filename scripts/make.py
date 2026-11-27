@@ -11,9 +11,10 @@
 # You should have received a copy of the GNU General Public License along with
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
+import os
 import utils
 from drivers import *
-from schema.keyboard import KeyboardUSBPort
+from schema.keyboard import KeyboardBluetoothLFCLK, KeyboardUSBPort
 
 Import("env")
 
@@ -151,6 +152,84 @@ if kb_json.actuation is not None:
     actuation = kb_json.actuation
     if actuation.actuation_point is not None:
         build_flags.define("ACTUATION_POINT", actuation.actuation_point)
+
+# Bluetooth Configuration
+bluetooth_enabled = bool(kb_json.bluetooth and kb_json.bluetooth.enabled)
+if bluetooth_enabled:
+    bt = kb_json.bluetooth
+    assert bt is not None
+    build_flags.define("BLUETOOTH_ENABLED")
+    device_name = bt.device_name or kb_json.name
+    build_flags.define("BLE_DEVICE_NAME", f'"{device_name}"')
+    build_flags.define("BLE_TX_POWER", bt.tx_power)
+    build_flags.define("BLE_IDLE_TIMEOUT_MS", bt.idle_timeout_ms)
+    build_flags.define("BLE_SLEEP_TIMEOUT_MS", bt.sleep_timeout_ms)
+
+    match bt.lfclk_source:
+        case KeyboardBluetoothLFCLK.XTAL:
+            build_flags.define("BLE_LFCLK_SOURCE_XTAL")
+        case KeyboardBluetoothLFCLK.RC:
+            build_flags.define("BLE_LFCLK_SOURCE_RC")
+        case KeyboardBluetoothLFCLK.SYNTH:
+            build_flags.define("BLE_LFCLK_SOURCE_SYNTH")
+
+    if bt.battery_pin is not None:
+        batt_channel = driver.metadata.adc.to_adc_inputs([bt.battery_pin])[0]
+        build_flags.define("BLE_BATTERY_ADC_CHANNEL", batt_channel)
+    # Fixed-point divider ratio (scaled by 1000) to avoid floating-point math
+    build_flags.define(
+        "BLE_BATTERY_DIVIDER_MILLIS", int(round(bt.battery_divider_ratio * 1000))
+    )
+
+# nRF52840 Bare-Metal SDK (CMSIS, nrfx/MDK, SoftDevice S140) Configuration
+if driver_name == "nrf52840xx":
+    sdk_root = os.path.join(env["PROJECT_DIR"], ".pio", "nrf52_sdk")
+    s140_inc = os.path.join(
+        sdk_root,
+        "s140",
+        "cores",
+        "nRF5",
+        "nordic",
+        "softdevice",
+        "s140_nrf52_7.3.0_API",
+        "include",
+    )
+
+    build_flags.define("NRF52840_XXAA")
+    build_flags.define("NRF52_SERIES")
+    build_flags.define("__STARTUP_CLEAR_BSS")
+    build_flags.define("__START", "main")
+    build_flags.define("__STACK_SIZE", 4096)
+    build_flags.define("__HEAP_SIZE", 512)
+
+    if bluetooth_enabled:
+        build_flags.define("SOFTDEVICE_PRESENT")
+        build_flags.define("S140")
+        build_flags.linker_defsym("SD_FLASH_SIZE", 0x27000)
+        build_flags.linker_defsym("SD_RAM_SIZE", 0x4000)
+    else:
+        build_flags.linker_defsym("SD_FLASH_SIZE", 0)
+        build_flags.linker_defsym("SD_RAM_SIZE", 0)
+
+    build_flags.include(os.path.join(sdk_root, "cmsis", "CMSIS", "Core", "Include"))
+    build_flags.include(os.path.join(sdk_root, "nrfx"))
+    build_flags.include(os.path.join(sdk_root, "nrfx", "mdk"))
+    build_flags.include(os.path.join(sdk_root, "nrfx", "hal"))
+    build_flags.include(os.path.join(sdk_root, "nrfx", "drivers", "include"))
+    build_flags.include(os.path.join(sdk_root, "nrfx", "templates"))
+    build_flags.include(s140_inc)
+    build_flags.include(os.path.join(s140_inc, "nrf52"))
+
+    # Compile Nordic MDK startup and system initialization sources
+    env.BuildSources(
+        os.path.join("$BUILD_DIR", "nrf52_mdk"),
+        os.path.join(sdk_root, "nrfx", "mdk"),
+        src_filter=[
+            "-<*>",
+            "+<system_nrf52840.c>",
+            "+<gcc_startup_nrf52840.S>",
+        ],
+    )
 
 # Add source build flags
 env.Append(BUILD_FLAGS=build_flags.get_flags())

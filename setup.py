@@ -46,18 +46,20 @@ if __name__ == "__main__":
     lib_deps = ["https://github.com/hathach/tinyusb.git#0.20.0"]
 
     pio_config = configparser.ConfigParser()
-    pio_config[f"env:{keyboard}"] = {
+    env_config = {
         "board": driver.platformio.board,
         "board_build.ldscript": f"linker/{driver.platformio.ldscript}",
         "build_flags": "\n".join(build_flags),
         "build_src_filter": "${env.build_src_filter}",
         "build_src_flags": "\n".join(build_src_flags),
         "extra_scripts": "\n".join(extra_scripts),
-        "framework": driver.platformio.framework,
         "lib_deps": "\n".join(lib_deps),
         "platform": driver.platformio.platform,
-        "upload_protocol": "dfu",
+        "upload_protocol": driver.platformio.upload_protocol,
     }
+    if driver.platformio.framework:
+        env_config["framework"] = driver.platformio.framework
+    pio_config[f"env:{keyboard}"] = env_config
 
     with open("platformio.ini", "w") as f:
         pio_config.write(f)

@@ -165,6 +165,7 @@ void layout_task(void) {
 
     if (k->is_pressed & !last_key_press) {
       // Key press event
+      ble_notify_activity();
       const uint8_t keycode = layout_get_keycode(current_layer, i);
       const uint8_t ak_index = advanced_key_indices[current_layer][i];
 
@@ -187,6 +188,7 @@ void layout_task(void) {
       }
     } else if (!k->is_pressed & last_key_press) {
       // Key release event
+      ble_notify_activity();
       const uint8_t keycode = active_keycodes[i];
       const uint8_t ak_index = active_advanced_keys[i];
 
@@ -300,6 +302,22 @@ void layout_register(uint8_t key, uint8_t keycode) {
 
   case SP_BOOT:
     board_enter_bootloader();
+    break;
+
+  case SP_BT_TOGGLE:
+    ble_toggle_transport();
+    break;
+
+  case SP_BT_USB:
+    ble_set_transport_mode(BLE_TRANSPORT_USB);
+    break;
+
+  case SP_BT_BLE:
+    ble_set_transport_mode(BLE_TRANSPORT_BLE);
+    break;
+
+  case SP_BT_PAIR:
+    ble_start_advertising(true);
     break;
 
   default:

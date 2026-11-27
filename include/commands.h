@@ -244,6 +244,15 @@ typedef struct {
 } command_staged_write_t;
 
 //---------------------------------------------------------------------+
+// Command Transport
+//---------------------------------------------------------------------+
+
+typedef enum {
+  COMMAND_TRANSPORT_USB = 0,
+  COMMAND_TRANSPORT_BLE,
+} command_transport_t;
+
+//---------------------------------------------------------------------+
 // Command API
 //---------------------------------------------------------------------+
 
@@ -255,7 +264,7 @@ typedef struct {
 void command_init(void);
 
 /**
- * @brief Queue a command buffer received from the raw HID interface
+ * @brief Queue a command buffer received from the USB raw HID interface
  *
  * Note that only one command can be queued at a time. The queued command will
  * be processed in the next call to `command_task`. Any subsequent commands
@@ -267,6 +276,19 @@ void command_init(void);
  * @return `true` if the command was queued
  */
 bool command_enqueue(const uint8_t *buf, uint16_t len);
+
+/**
+ * @brief Queue a command buffer received from a specific raw HID transport
+ * (USB or BLE)
+ *
+ * @param buf Command buffer
+ * @param len Buffer length in bytes
+ * @param transport Transport that received the command
+ *
+ * @return `true` if the command was queued
+ */
+bool command_enqueue_from(const uint8_t *buf, uint16_t len,
+                          command_transport_t transport);
 
 /**
  * @brief Process queued raw HID commands and send pending responses

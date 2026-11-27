@@ -113,3 +113,22 @@ void analog_task(void);
  * @return Raw ADC value
  */
 uint16_t analog_read(uint8_t key);
+
+#if defined(BLUETOOTH_ENABLED)
+/**
+ * @brief Set the delay interval between full matrix ADC scans for power saving
+ *
+ * @param interval_us Interval in microseconds (0 for continuous full-speed
+ * scanning)
+ *
+ * @return None
+ */
+void analog_set_scan_interval(uint32_t interval_us);
+
+/**
+ * @brief Measure the battery voltage in millivolts using the ADC
+ *
+ * @return Battery voltage in millivolts
+ */
+uint16_t analog_read_battery_mv(void);
+#endif

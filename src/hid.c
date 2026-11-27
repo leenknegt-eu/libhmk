@@ -16,6 +16,7 @@
 #include "hid.h"
 
 #include "commands.h"
+#include "hardware/hardware.h"
 #include "keycodes.h"
 #include "matrix.h"
 #include "tusb.h"
@@ -30,16 +31,21 @@ static uint16_t consumer_report;
 static hid_mouse_report_t mouse_report;
 
 #if !defined(HID_DISABLED)
+static hid_nkro_kb_report_t prev_kb_report;
+#endif
+static uint16_t prev_system_report;
+static uint16_t prev_consumer_report;
+static hid_mouse_report_t prev_mouse_report;
+
+#if !defined(HID_DISABLED)
 /**
- * @brief Send the keyboard report
+ * @brief Send the keyboard report over USB
  *
  * This function will send the keyboard report to its exclusive interface.
  *
  * @return None
  */
 static void hid_send_keyboard_report(void) {
-  static hid_nkro_kb_report_t prev_kb_report = {0};
-
   if (memcmp(&prev_kb_report, &kb_report, sizeof(prev_kb_report)) == 0)
     // Don't send the report if it hasn't changed
     return;
@@ -50,17 +56,13 @@ static void hid_send_keyboard_report(void) {
 #endif
 
 /**
- * @brief Find the next available report and send it
+ * @brief Find the next available report and send it over USB
  *
  * @param starting_report_id The report ID to start searching from
  *
  * @return None
  */
 static void hid_send_hid_report(uint8_t starting_report_id) {
-  static uint16_t prev_system_report = 0;
-  static uint16_t prev_consumer_report = 0;
-  static hid_mouse_report_t prev_mouse_report = {0};
-
   for (uint8_t report_id = starting_report_id; report_id < REPORT_ID_COUNT;
        report_id++) {
     switch (report_id) {
@@ -97,6 +99,39 @@ static void hid_send_hid_report(uint8_t starting_report_id) {
     }
   }
 }
+
+#if defined(BLUETOOTH_ENABLED) && !defined(HID_DISABLED)
+/**
+ * @brief Send changed HID reports over Bluetooth Low Energy
+ *
+ * @return None
+ */
+static void hid_send_ble_reports(void) {
+  if (!ble_is_connected())
+    return;
+
+  if (memcmp(&prev_kb_report, &kb_report, sizeof(prev_kb_report)) != 0) {
+    if (ble_hid_send_keyboard(&kb_report, sizeof(kb_report)))
+      prev_kb_report = kb_report;
+  }
+
+  if (system_report != prev_system_report) {
+    if (ble_hid_send_system(system_report))
+      prev_system_report = system_report;
+  }
+
+  if (consumer_report != prev_consumer_report) {
+    if (ble_hid_send_consumer(consumer_report))
+      prev_consumer_report = consumer_report;
+  }
+
+  if (memcmp(&prev_mouse_report, &mouse_report, sizeof(prev_mouse_report)) !=
+      0) {
+    if (ble_hid_send_mouse(&mouse_report, sizeof(mouse_report)))
+      prev_mouse_report = mouse_report;
+  }
+}
+#endif
 
 void hid_init(void) {}
 
@@ -197,6 +232,39 @@ void hid_keycode_remove(uint8_t keycode) {
 
 void hid_send_reports(void) {
 #if !defined(HID_DISABLED)
+#if defined(BLUETOOTH_ENABLED)
+  ble_notify_activity();
+
+  if (!ble_is_usb_active()) {
+    hid_send_ble_reports();
+    return;
+  }
+
+  if (tud_suspended())
+    // Wake up the host if it's suspended
+    tud_remote_wakeup();
+
+  while (!tud_hid_n_ready(USB_ITF_KEYBOARD)) {
+    // Wait for the keyboard interface to be ready, aborting if USB disconnects
+    if (!ble_is_usb_active())
+      return;
+    tud_task();
+    ble_task();
+  }
+
+  hid_send_keyboard_report();
+
+  while (!tud_hid_n_ready(USB_ITF_HID)) {
+    // Wait for the HID interface to be ready, aborting if USB disconnects
+    if (!ble_is_usb_active())
+      return;
+    tud_task();
+    ble_task();
+  }
+
+  // Start from the first report ID
+  hid_send_hid_report(REPORT_ID_SYSTEM_CONTROL);
+#else
   if (tud_suspended())
     // Wake up the host if it's suspended
     tud_remote_wakeup();
@@ -213,6 +281,7 @@ void hid_send_reports(void) {
 
   // Start from the first report ID
   hid_send_hid_report(REPORT_ID_SYSTEM_CONTROL);
+#endif
 #endif
 }
 

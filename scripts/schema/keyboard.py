@@ -20,6 +20,33 @@ class KeyboardUSBPort(str, Enum):
     HIGH_SPEED = "hs"
 
 
+class KeyboardBluetoothLFCLK(str, Enum):
+    XTAL = "xtal"
+    RC = "rc"
+    SYNTH = "synth"
+
+
+# Bluetooth Configuration
+class KeyboardBluetooth(BaseModel):
+    # Whether Bluetooth (BLE) is enabled
+    enabled: bool = True
+    # BLE advertising device name. Defaults to the keyboard name if omitted.
+    device_name: str | None = None
+    # Low-frequency clock source for the BLE stack
+    lfclk_source: KeyboardBluetoothLFCLK = KeyboardBluetoothLFCLK.XTAL
+    # Radio transmit power in dBm (-40 to +8 on nRF52840)
+    tx_power: int = Field(ge=-40, le=8, default=0)
+    # Optional ADC channel or GPIO pin connected to the battery voltage divider.
+    # If omitted, the internal VDD channel is measured instead.
+    battery_pin: NonNegativeInt | str | None = None
+    # Voltage divider ratio (e.g., 2.0 for a 1:1 divider, 1.0 for direct VDD)
+    battery_divider_ratio: PositiveFloat = 1.0
+    # Inactivity timeout in milliseconds before throttling matrix scan rate (idle mode)
+    idle_timeout_ms: NonNegativeInt = 30000
+    # Inactivity timeout in milliseconds before entering low-power sleep mode
+    sleep_timeout_ms: NonNegativeInt = 300000
+
+
 # USB Configuration
 class KeyboardUSB(BaseModel):
     # USB Vendor ID
@@ -135,3 +162,4 @@ class Keyboard(BaseModel):
     # Default keymaps for each profile. If not specified, the default keymap will be used for all profiles.
     keymaps: list[list[list[str]]] | None = None
     actuation: KeyboardActuation | None = None
+    bluetooth: KeyboardBluetooth | None = None
