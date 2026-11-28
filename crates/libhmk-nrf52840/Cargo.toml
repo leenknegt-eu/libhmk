@@ -16,6 +16,9 @@ libhmk-config = { workspace = true }
 
 [dependencies]
 libhmk-core = { workspace = true, features = ["defmt"] }
+libhmk-link = { workspace = true, features = ["defmt"] }
+libhmk-nrf-esb = { workspace = true, features = ["defmt"] }
+critical-section = "1.2"
 
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }

@@ -243,7 +243,7 @@ pub async fn run_scanner(
     let mut buf = [0i16; NUM_SAADC_CHANNELS];
 
     loop {
-        if kb::BLUETOOTH_ENABLED {
+        if kb::WIRELESS_ENABLED {
             samples.set_battery_mv(measure_battery_mv(&mut saadc_p, &mut inputs).await);
         }
 
@@ -251,7 +251,7 @@ pub async fn run_scanner(
         saadc.calibrate().await;
         let battery_due = Instant::now() + BATTERY_INTERVAL;
 
-        while !kb::BLUETOOTH_ENABLED || Instant::now() < battery_due {
+        while !kb::WIRELESS_ENABLED || Instant::now() < battery_due {
             for (mux_ch, keys) in kb::ADC_MUX_INPUT_MATRIX.iter().enumerate() {
                 for (bit, pin) in select_pins.iter_mut().enumerate() {
                     if (mux_ch >> bit) & 1 != 0 {

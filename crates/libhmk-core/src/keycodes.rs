@@ -191,6 +191,8 @@ pub const SP_BT_TOGGLE: u8 = 0xD5;
 pub const SP_BT_USB: u8 = 0xD6;
 pub const SP_BT_BLE: u8 = 0xD7;
 pub const SP_BT_PAIR: u8 = 0xD8;
+/// Select the 2.4 GHz dongle link (libhmk Rust extension; not in the C keycode table).
+pub const SP_BT_24G: u8 = 0xD9;
 
 #[inline]
 pub const fn mo(layer: u8) -> u8 {

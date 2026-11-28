@@ -1,14 +1,23 @@
 //! Hardware abstraction traits implemented by each MCU firmware crate.
 
-/// Output transport mode for dual-mode USB/BLE keyboards.
+/// Output transport mode for keyboards with a wireless link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BleTransportMode {
-    /// Prefer USB when mounted, automatically fall back to BLE otherwise.
+    /// Prefer USB when mounted, automatically fall back to wireless otherwise.
     #[default]
     Auto,
     /// Force USB transport.
     Usb,
-    /// Force BLE transport even when USB VBUS is present.
+    /// Force the wireless link (BLE or 2.4 GHz, see [`WirelessBackend`]) even on USB power.
+    Wireless,
+}
+
+/// Radio stack used for the wireless link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WirelessBackend {
+    /// 2.4 GHz Enhanced ShockBurst to a USB dongle.
+    Esb,
+    /// Bluetooth Low Energy.
     Ble,
 }
 
@@ -37,6 +46,8 @@ pub enum CommandTransport {
     #[default]
     Usb,
     Ble,
+    /// 2.4 GHz dongle link.
+    Rf,
 }
 
 /// Internal flash driver abstraction used by wear leveling.
@@ -81,7 +92,10 @@ pub trait AnalogInput {
 pub trait BleControl {
     fn toggle_transport(&mut self) {}
     fn set_transport_mode(&mut self, _mode: BleTransportMode) {}
+    /// Pairing: BLE advertising, or the 2.4 GHz dongle pairing window.
     fn start_advertising(&mut self, _disconnect_current: bool) {}
+    /// Switch the wireless backend (may persist the choice and reboot).
+    fn select_wireless_backend(&mut self, _backend: WirelessBackend) {}
     fn notify_activity(&mut self) {}
 }
 

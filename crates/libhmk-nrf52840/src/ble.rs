@@ -1,6 +1,7 @@
-//! TrouBLE BLE GATT server (HOGP + Raw HID + DIS + BAS) + dual-mode transport & power manager.
+//! TrouBLE BLE GATT server (HOGP + Raw HID + DIS + BAS). Transport and power management are in
+//! `wireless.rs`.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use defmt::{info, warn};
 use embassy_futures::join::join;
@@ -8,19 +9,19 @@ use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
-use embassy_time::{Instant, Timer};
+use embassy_time::Timer;
 use libhmk_core::hid::{
     KeyboardReport, MouseReport, PendingHidReports, BLE_HID_REPORT_MAP, BLE_REPORT_ID_CONSUMER,
     BLE_REPORT_ID_KEYBOARD, BLE_REPORT_ID_MOUSE, BLE_REPORT_ID_RAW_HID, BLE_REPORT_ID_SYSTEM,
     RAW_HID_EP_SIZE,
 };
-use libhmk_core::traits::{BleControl, BlePowerState, BleTransportMode, CommandTransport};
+use libhmk_core::traits::CommandTransport;
 use trouble_host::prelude::*;
 
 use crate::analog::SharedAnalogSamples;
 use crate::board::NrfBoard;
 use crate::kb;
-use crate::usb::{is_usb_mounted, UsbRawCommand, CMD_RX};
+use crate::usb::{UsbRawCommand, CMD_RX};
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 3; // Signal + ATT + SMP
@@ -30,9 +31,6 @@ pub static BLE_RAW_TX: Channel<CriticalSectionRawMutex, [u8; RAW_HID_EP_SIZE], 4
 static BLE_DISCONNECT_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static BLE_CONNECTED: AtomicBool = AtomicBool::new(false);
-static TRANSPORT_MODE: AtomicU8 = AtomicU8::new(0); // 0 = Auto, 1 = Usb, 2 = Ble
-static POWER_STATE: AtomicU8 = AtomicU8::new(0); // 0 = Active, 1 = Idle, 2 = Sleep
-static LAST_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
 
 //--------------------------------------------------------------------+
 // GATT Server Definition (DIS 0x180A, BAS 0x180F, HIDS 0x1812)
@@ -124,111 +122,14 @@ struct HidService {
     raw_out: [u8; RAW_HID_EP_SIZE],
 }
 
-//--------------------------------------------------------------------+
-// Dual-Mode Transport & Power Management Controller
-//--------------------------------------------------------------------+
-
-pub struct NrfBleController {
-    samples: &'static SharedAnalogSamples,
+/// A BLE central is connected.
+pub fn is_connected() -> bool {
+    BLE_CONNECTED.load(Ordering::Acquire)
 }
 
-impl NrfBleController {
-    pub const fn new(samples: &'static SharedAnalogSamples) -> Self {
-        Self { samples }
-    }
-
-    pub fn transport_mode(&self) -> BleTransportMode {
-        match TRANSPORT_MODE.load(Ordering::Relaxed) {
-            1 => BleTransportMode::Usb,
-            2 => BleTransportMode::Ble,
-            _ => BleTransportMode::Auto,
-        }
-    }
-
-    pub fn is_usb_active(&self) -> bool {
-        match self.transport_mode() {
-            BleTransportMode::Usb => true,
-            BleTransportMode::Ble => false,
-            BleTransportMode::Auto => is_usb_mounted(),
-        }
-    }
-
-    pub fn is_ble_connected(&self) -> bool {
-        BLE_CONNECTED.load(Ordering::Acquire)
-    }
-
-    /// Update Active / Idle / Sleep SAADC scan throttling when running on battery.
-    pub fn update_power_state(&self) {
-        if self.is_usb_active() {
-            if POWER_STATE.swap(BlePowerState::Active as u8, Ordering::Relaxed)
-                != BlePowerState::Active as u8
-            {
-                self.samples.set_scan_interval_us(0);
-            }
-            return;
-        }
-
-        let now = Instant::now().as_millis() as u32;
-        let inactive = now.wrapping_sub(LAST_ACTIVITY_MS.load(Ordering::Relaxed));
-
-        if kb::BLE_SLEEP_TIMEOUT_MS > 0 && inactive >= kb::BLE_SLEEP_TIMEOUT_MS {
-            if POWER_STATE.swap(BlePowerState::Sleep as u8, Ordering::Relaxed)
-                != BlePowerState::Sleep as u8
-            {
-                self.samples.set_scan_interval_us(20_000);
-            }
-        } else if kb::BLE_IDLE_TIMEOUT_MS > 0 && inactive >= kb::BLE_IDLE_TIMEOUT_MS {
-            if POWER_STATE.swap(BlePowerState::Idle as u8, Ordering::Relaxed)
-                != BlePowerState::Idle as u8
-            {
-                self.samples.set_scan_interval_us(5_000);
-            }
-        }
-    }
-}
-
-impl BleControl for NrfBleController {
-    fn toggle_transport(&mut self) {
-        let next = match self.transport_mode() {
-            BleTransportMode::Auto => {
-                if self.is_usb_active() {
-                    BleTransportMode::Ble
-                } else {
-                    BleTransportMode::Usb
-                }
-            }
-            BleTransportMode::Usb => BleTransportMode::Ble,
-            BleTransportMode::Ble => BleTransportMode::Auto,
-        };
-        self.set_transport_mode(next);
-    }
-
-    fn set_transport_mode(&mut self, mode: BleTransportMode) {
-        let val = match mode {
-            BleTransportMode::Auto => 0,
-            BleTransportMode::Usb => 1,
-            BleTransportMode::Ble => 2,
-        };
-        TRANSPORT_MODE.store(val, Ordering::Relaxed);
-        self.notify_activity();
-    }
-
-    fn start_advertising(&mut self, disconnect_current: bool) {
-        self.notify_activity();
-        if disconnect_current && self.is_ble_connected() {
-            BLE_DISCONNECT_SIGNAL.signal(());
-        }
-    }
-
-    fn notify_activity(&mut self) {
-        let now = Instant::now().as_millis() as u32;
-        LAST_ACTIVITY_MS.store(now, Ordering::Relaxed);
-        if POWER_STATE.swap(BlePowerState::Active as u8, Ordering::Relaxed)
-            != BlePowerState::Active as u8
-        {
-            self.samples.set_scan_interval_us(0);
-        }
-    }
+/// Drop the current connection so a new host can pair (`BT_PAIR`).
+pub fn request_disconnect() {
+    BLE_DISCONNECT_SIGNAL.signal(());
 }
 
 //--------------------------------------------------------------------+

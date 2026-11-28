@@ -1,0 +1,30 @@
+[package]
+name = "libhmk-nrf52840-dongle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "2.4 GHz USB receiver firmware (nRF52840 Dongle PCA10059) for libhmk keyboards"
+
+[build-dependencies]
+libhmk-config = { workspace = true }
+
+[dependencies]
+libhmk-core = { workspace = true, features = ["defmt"] }
+libhmk-link = { workspace = true, features = ["defmt"] }
+libhmk-nrf-esb = { workspace = true, features = ["defmt"] }
+
+cortex-m = { workspace = true, features = ["critical-section-single-core"] }
+# The Nordic MBR occupies 0x0..0x1000: point VTOR at the application's vector table so the
+# radio interrupt is not forwarded through the MBR.
+cortex-m-rt = { workspace = true, features = ["set-vtor"] }
+critical-section = "1.2"
+defmt = { workspace = true }
+defmt-rtt = { workspace = true }
+static_cell = { workspace = true }
+
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-nrf = { workspace = true, features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "rt"] }
+embassy-usb = { workspace = true, features = ["defmt"] }

@@ -3,13 +3,17 @@ resolver = "2"
 members = [
     "crates/libhmk-config",
     "crates/libhmk-core",
+    "crates/libhmk-link",
+    "crates/libhmk-nrf-esb",
     "crates/libhmk-nrf52840",
+    "crates/libhmk-nrf52840-dongle",
     "crates/libhmk-stm32f446",
     "crates/libhmk-at32f405",
 ]
 default-members = [
     "crates/libhmk-config",
     "crates/libhmk-core",
+    "crates/libhmk-link",
 ]
 
 [workspace.package]
@@ -22,6 +26,8 @@ repository = "https://github.com/leenknegt-eu/libhmk"
 # Core & build-time crates
 libhmk-config = { path = "crates/libhmk-config" }
 libhmk-core = { path = "crates/libhmk-core" }
+libhmk-link = { path = "crates/libhmk-link" }
+libhmk-nrf-esb = { path = "crates/libhmk-nrf-esb" }
 
 # Embedded runtime & Embassy ecosystem
 cortex-m = "0.7.7"

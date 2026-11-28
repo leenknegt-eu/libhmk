@@ -94,6 +94,53 @@ pub struct KeyboardBluetooth {
     pub sleep_timeout_ms: u32,
 }
 
+/// Wireless backend selected on first boot (later changed with `BT_BLE` / `BT_24G`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WirelessDefault {
+    #[default]
+    Esb,
+    Ble,
+}
+
+/// 2.4 GHz Enhanced ShockBurst link settings (keyboard and dongle are built from the same file).
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyboardEsb {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// RF channel, 2400 MHz + `channel` MHz.
+    #[serde(default = "default_esb_channel")]
+    pub channel: u8,
+    /// Transmit power in dBm.
+    #[serde(default)]
+    pub tx_power: i8,
+}
+
+impl Default for KeyboardEsb {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel: default_esb_channel(),
+            tx_power: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KeyboardWireless {
+    #[serde(default)]
+    pub default: WirelessDefault,
+    #[serde(default)]
+    pub esb: KeyboardEsb,
+}
+
+fn default_esb_channel() -> u8 {
+    40
+}
+
+/// Valid nRF52840 TXPOWER settings (dBm).
+const NRF52840_TX_POWERS: [i8; 15] = [-40, -20, -16, -12, -8, -4, 0, 2, 3, 4, 5, 6, 7, 8, -30];
+
 fn default_true() -> bool {
     true
 }
@@ -182,6 +229,7 @@ pub struct KeyboardConfig {
     pub keymaps: Option<Vec<Vec<Vec<String>>>>,
     pub actuation: Option<KeyboardActuation>,
     pub bluetooth: Option<KeyboardBluetooth>,
+    pub wireless: Option<KeyboardWireless>,
 }
 
 impl KeyboardConfig {
@@ -266,6 +314,31 @@ impl KeyboardConfig {
         }
         if !(1..=255).contains(&kb.num_macro_nodes) {
             return Err("num_macro_nodes must be in 1..=255".into());
+        }
+
+        if let Some(w) = &self.wireless {
+            if self.hardware.driver != "nrf52840xx" {
+                return Err("`wireless` is only supported on the nrf52840xx driver".into());
+            }
+            if w.esb.channel > 100 {
+                return Err("wireless.esb.channel must be in 0..=100".into());
+            }
+            if !NRF52840_TX_POWERS.contains(&w.esb.tx_power) {
+                return Err(format!(
+                    "wireless.esb.tx_power {} dBm is not a valid nRF52840 setting",
+                    w.esb.tx_power
+                ));
+            }
+            let ble = self.bluetooth.as_ref().is_some_and(|b| b.enabled);
+            match w.default {
+                WirelessDefault::Esb if !w.esb.enabled => {
+                    return Err("wireless.default is \"esb\" but wireless.esb.enabled is false".into())
+                }
+                WirelessDefault::Ble if !ble => {
+                    return Err("wireless.default is \"ble\" but bluetooth is not enabled".into())
+                }
+                _ => {}
+            }
         }
 
         let keymaps = self.resolve_default_keymaps()?;
@@ -577,6 +650,19 @@ impl KeyboardConfig {
             writeln!(out, "pub const BLE_BATTERY_DIVIDER_MILLIS: u32 = 1000;").unwrap();
         }
 
+        // 2.4 GHz link (Enhanced ShockBurst)
+        let ble_enabled = self.bluetooth.as_ref().is_some_and(|b| b.enabled);
+        let esb = self.wireless.as_ref().map(|w| &w.esb).filter(|e| e.enabled);
+        let default_ble = match &self.wireless {
+            Some(w) => w.default == WirelessDefault::Ble || esb.is_none(),
+            None => true,
+        };
+        writeln!(out, "pub const ESB_ENABLED: bool = {};", esb.is_some()).unwrap();
+        writeln!(out, "pub const ESB_CHANNEL: u8 = {};", esb.map_or(40, |e| e.channel)).unwrap();
+        writeln!(out, "pub const ESB_TX_POWER: i8 = {};", esb.map_or(0, |e| e.tx_power)).unwrap();
+        writeln!(out, "pub const WIRELESS_ENABLED: bool = {};", ble_enabled || esb.is_some()).unwrap();
+        writeln!(out, "pub const WIRELESS_DEFAULT_BLE: bool = {};", default_ble && ble_enabled).unwrap();
+
         // Default keymaps as byte arrays resolved via libhmk_core::keycodes::parse_keycode_expr
         writeln!(
             out,
@@ -605,8 +691,23 @@ impl KeyboardConfig {
 
     /// Generate `memory.x` for `cortex-m-rt` with Flash reserved for wear leveling.
     pub fn generate_memory_x(&self) -> Result<String, String> {
-        let driver = self.driver()?;
+        self.generate_memory_x_reserving(0)
+    }
+
+    /// Flash offset of a `bytes`-sized region reserved directly below the wear-leveling area
+    /// (e.g. the nRF52840 wireless link settings page).
+    pub fn reserved_below_wl(&self, bytes: u32) -> Result<u32, String> {
         let wl_base = self.wl_base_address()?;
+        wl_base
+            .checked_sub(bytes)
+            .ok_or_else(|| "not enough flash for the reserved region".to_string())
+    }
+
+    /// Like [`Self::generate_memory_x`], additionally keeping `reserved_bytes` below the
+    /// wear-leveling area out of the application's FLASH region.
+    pub fn generate_memory_x_reserving(&self, reserved_bytes: u32) -> Result<String, String> {
+        let driver = self.driver()?;
+        let wl_base = self.reserved_below_wl(reserved_bytes)? + reserved_bytes;
         let flash_total = driver.flash.total_size();
         Ok(format!(
             "/* Auto-generated by libhmk-config for {} */\n\
@@ -618,7 +719,7 @@ impl KeyboardConfig {
              }}\n",
             driver.name,
             driver.flash.base_addr,
-            wl_base,
+            wl_base - reserved_bytes,
             driver.flash.base_addr + wl_base,
             flash_total - wl_base,
             driver.ram_origin,
@@ -824,6 +925,7 @@ pub fn resolve_keycode_name(name: &str) -> Result<u8, String> {
         "SP_BT_USB" | "BT_USB" => 0xD6,
         "SP_BT_BLE" | "BT_BLE" => 0xD7,
         "SP_BT_PAIR" | "BT_PAIR" => 0xD8,
+        "SP_BT_24G" | "BT_24G" => 0xD9,
         other => return Err(format!("Unknown keycode: '{other}'")),
     };
     Ok(code)

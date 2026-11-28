@@ -1049,12 +1049,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "libhmk-link"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.2.0",
+ "libhmk-core",
+]
+
+[[package]]
+name = "libhmk-nrf-esb"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "critical-section",
+ "defmt 1.2.0",
+ "embassy-nrf",
+ "embassy-sync",
+]
+
+[[package]]
 name = "libhmk-nrf52840"
 version = "0.1.0"
 dependencies = [
  "bt-hci 0.11.0",
  "cortex-m",
  "cortex-m-rt",
+ "critical-section",
  "defmt 1.2.0",
  "defmt-rtt",
  "embassy-executor",
@@ -1066,11 +1086,35 @@ dependencies = [
  "embedded-storage",
  "libhmk-config",
  "libhmk-core",
+ "libhmk-link",
+ "libhmk-nrf-esb",
  "nrf-mpsl",
  "nrf-sdc",
  "panic-probe",
  "static_cell",
  "trouble-host",
+]
+
+[[package]]
+name = "libhmk-nrf52840-dongle"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt 1.2.0",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-nrf",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "libhmk-config",
+ "libhmk-core",
+ "libhmk-link",
+ "libhmk-nrf-esb",
+ "static_cell",
 ]
 
 [[package]]

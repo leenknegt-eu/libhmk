@@ -1,4 +1,8 @@
-//! Nordic nRF52840 Embassy + TrouBLE BLE + USB Hall-effect keyboard firmware entry point.
+//! Nordic nRF52840 Hall-effect keyboard firmware: USB, 2.4 GHz dongle link (Enhanced ShockBurst,
+//! primary wireless) and optional Bluetooth LE (TrouBLE + SoftDevice Controller).
+//!
+//! The wireless backend is chosen at boot from the stored link settings: both stacks need the
+//! RADIO and TIMER0, so only one runs at a time and switching (`BT_24G` / `BT_BLE`) reboots.
 
 #![no_std]
 #![no_main]
@@ -9,10 +13,13 @@ mod ble;
 mod board;
 mod flash;
 mod probe;
+mod rf;
 mod usb;
+mod wireless;
 
 pub mod kb {
     include!(concat!(env!("OUT_DIR"), "/keyboard_gen.rs"));
+    include!(concat!(env!("OUT_DIR"), "/link_gen.rs"));
 }
 
 use defmt::{info, unwrap};
@@ -22,6 +29,8 @@ use embassy_nrf::mode::Async;
 use embassy_nrf::nvmc::Nvmc;
 use embassy_nrf::peripherals::{RNG, USBD};
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
+use embassy_nrf::interrupt;
+use embassy_nrf::interrupt::typelevel::{self as irq, Binding, Handler};
 use embassy_nrf::{bind_interrupts, pac, rng, saadc, usb as nrf_usb};
 use embassy_futures::select::select;
 use embassy_futures::yield_now;
@@ -31,6 +40,7 @@ use libhmk_core::matrix::MATRIX_CALIBRATION_DURATION_MS;
 use libhmk_core::traits::CommandTransport;
 use libhmk_core::types::Calibration;
 use libhmk_core::Firmware;
+use libhmk_link::{Backend, LinkSettings};
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use panic_probe as _;
@@ -39,11 +49,13 @@ use trouble_host::prelude::DefaultPacketPool;
 use trouble_host::PacketPool;
 
 use crate::analog::{make_select_output, run_scanner, AdcInputs, SettleTimer, SharedAnalogSamples, SCAN_DONE};
-use crate::ble::{run_ble, NrfBleController, BLE_HID_TX, BLE_RAW_TX};
+use crate::ble::{run_ble, BLE_HID_TX, BLE_RAW_TX};
 use crate::board::NrfBoard;
 use crate::flash::NrfFlash;
 use crate::probe::Probe;
+use crate::rf::RF_RAW_TX;
 use crate::usb::{usb_task, CMD_RX, USB_HID_TX, USB_RAW_TX};
+use crate::wireless::WirelessController;
 
 bind_interrupts!(pub struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -51,10 +63,33 @@ bind_interrupts!(pub struct Irqs {
     USBD => nrf_usb::InterruptHandler<USBD>;
     EGU0_SWI0 => nrf_sdc::mpsl::LowPrioInterruptHandler;
     CLOCK_POWER => nrf_sdc::mpsl::ClockInterruptHandler;
-    RADIO => nrf_sdc::mpsl::HighPrioInterruptHandler;
-    TIMER0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
 });
+
+// RADIO and TIMER0 are shared by the two radio stacks: the vectors below dispatch to the ESB
+// driver or to MPSL, whichever was started at boot.
+// SAFETY: `RADIO` / `TIMER0` call `HighPrioInterruptHandler::on_interrupt` whenever MPSL owns
+// the radio (the ESB driver is not active).
+unsafe impl Binding<irq::RADIO, mpsl::HighPrioInterruptHandler> for Irqs {}
+unsafe impl Binding<irq::TIMER0, mpsl::HighPrioInterruptHandler> for Irqs {}
+
+#[interrupt]
+unsafe fn RADIO() {
+    if libhmk_nrf_esb::is_active() {
+        libhmk_nrf_esb::on_radio_interrupt();
+    } else {
+        <mpsl::HighPrioInterruptHandler as Handler<irq::RADIO>>::on_interrupt();
+    }
+}
+
+#[interrupt]
+unsafe fn TIMER0() {
+    if libhmk_nrf_esb::is_active() {
+        libhmk_nrf_esb::on_timer_interrupt();
+    } else {
+        <mpsl::HighPrioInterruptHandler as Handler<irq::TIMER0>>::on_interrupt();
+    }
+}
 
 static SAMPLES: SharedAnalogSamples = SharedAnalogSamples::new();
 
@@ -102,6 +137,11 @@ async fn ble_task(sdc: sdc::SoftdeviceController<'static>) -> ! {
     run_ble(sdc, &SAMPLES).await
 }
 
+#[embassy_executor::task]
+async fn rf_task(ptx: libhmk_nrf_esb::Ptx, paired: bool) -> ! {
+    rf::run_ptx(ptx, paired, &SAMPLES).await
+}
+
 fn build_sdc<'d, const N: usize>(
     p: sdc::Peripherals<'d>,
     rng: &'d mut rng::Rng<Async>,
@@ -126,39 +166,68 @@ async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
     info!("libhmk-nrf52840 starting ({})", kb::USB_PRODUCT_NAME);
 
-    // 1. Initialize Nordic Multiprotocol Service Layer (MPSL) for BLE radio timing
-    let mpsl_p = mpsl::Peripherals::new(
-        p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31,
-    );
-    let lfclk_cfg = mpsl::raw::mpsl_clock_lfclk_cfg_t {
-        source: mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
-        rc_ctiv: 0,
-        rc_temp_ctiv: 0,
-        accuracy_ppm: 20,
-        skip_wait_lfclk_started: false,
+    // 1. Link settings decide which wireless stack owns the radio for this boot.
+    let mut flash = NrfFlash::new(Nvmc::new(p.NVMC));
+    let stored = flash.read_link_settings();
+    let mut settings = stored.unwrap_or(LinkSettings::new(wireless::default_backend()));
+    let backend = if kb::WIRELESS_ENABLED {
+        wireless::resolve_backend(settings.backend)
+    } else {
+        None
     };
-    static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
-    let mpsl = MPSL.init(unwrap!(MultiprotocolServiceLayer::new(
-        mpsl_p, Irqs, lfclk_cfg
-    )));
-    spawner.spawn(unwrap!(mpsl_task(mpsl)));
-
-    // 2. Initialize Nordic SoftDevice Controller (SDC) + TrouBLE BLE task
-    static RNG_CELL: StaticCell<rng::Rng<Async>> = StaticCell::new();
-    let ble_rng = RNG_CELL.init(rng::Rng::new(p.RNG, Irqs));
-    static SDC_MEM: StaticCell<sdc::Mem<4720>> = StaticCell::new();
-    let sdc_p = sdc::Peripherals::new(
-        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
-        p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+    if let Some(b) = backend {
+        settings.backend = b;
+    }
+    wireless::init(settings);
+    info!(
+        "wireless backend: {}",
+        match backend {
+            Some(Backend::Esb) => "2.4 GHz (ESB)",
+            Some(Backend::Ble) => "Bluetooth LE",
+            None => "none (USB only)",
+        }
     );
-    let sdc = unwrap!(build_sdc(
-        sdc_p,
-        ble_rng,
-        mpsl,
-        SDC_MEM.init(sdc::Mem::new())
-    ));
-    if kb::BLUETOOTH_ENABLED {
-        spawner.spawn(unwrap!(ble_task(sdc)));
+
+    match backend {
+        Some(Backend::Esb) => {
+            // 2a. 2.4 GHz dongle link
+            let ptx = rf::make_ptx(p.RADIO, p.TIMER0, settings.paired);
+            spawner.spawn(unwrap!(rf_task(ptx, settings.paired.is_some())));
+        }
+        Some(Backend::Ble) => {
+            // 2b. Nordic Multiprotocol Service Layer (MPSL) + SoftDevice Controller + TrouBLE
+            let mpsl_p = mpsl::Peripherals::new(
+                p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31,
+            );
+            let lfclk_cfg = mpsl::raw::mpsl_clock_lfclk_cfg_t {
+                source: mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+                rc_ctiv: 0,
+                rc_temp_ctiv: 0,
+                accuracy_ppm: 20,
+                skip_wait_lfclk_started: false,
+            };
+            static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
+            let mpsl = MPSL.init(unwrap!(MultiprotocolServiceLayer::new(
+                mpsl_p, Irqs, lfclk_cfg
+            )));
+            spawner.spawn(unwrap!(mpsl_task(mpsl)));
+
+            static RNG_CELL: StaticCell<rng::Rng<Async>> = StaticCell::new();
+            let ble_rng = RNG_CELL.init(rng::Rng::new(p.RNG, Irqs));
+            static SDC_MEM: StaticCell<sdc::Mem<4720>> = StaticCell::new();
+            let sdc_p = sdc::Peripherals::new(
+                p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23,
+                p.PPI_CH24, p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+            );
+            let sdc = unwrap!(build_sdc(
+                sdc_p,
+                ble_rng,
+                mpsl,
+                SDC_MEM.init(sdc::Mem::new())
+            ));
+            spawner.spawn(unwrap!(ble_task(sdc)));
+        }
+        None => {}
     }
 
     // 3. Initialize USB Full-Speed (SoftwareVbusDetect polled alongside MPSL)
@@ -193,9 +262,8 @@ async fn main(spawner: Spawner) {
     )));
 
     // 5. Initialize libhmk-core Firmware engine
-    let mut flash = NrfFlash::new(Nvmc::new(p.NVMC));
     let mut board = NrfBoard;
-    let mut ble_ctrl = NrfBleController::new(&SAMPLES);
+    let mut ble_ctrl = WirelessController::new(&SAMPLES, backend);
 
     let layout_cfg = EeconfigLayout {
         num_profiles: kb::NUM_PROFILES,
@@ -273,6 +341,9 @@ async fn main(spawner: Spawner) {
                 CommandTransport::Ble => {
                     let _ = BLE_RAW_TX.try_send(resp);
                 }
+                CommandTransport::Rf => {
+                    let _ = RF_RAW_TX.try_send(resp);
+                }
             }
             if fw.commands.recalibrate_requested {
                 fw.commands.recalibrate_requested = false;
@@ -286,8 +357,27 @@ async fn main(spawner: Spawner) {
         if !out.hid.is_empty() {
             if ble_ctrl.is_usb_active() {
                 let _ = USB_HID_TX.try_send(out.hid);
-            } else if ble_ctrl.is_ble_connected() {
-                let _ = BLE_HID_TX.try_send(out.hid);
+            } else {
+                match ble_ctrl.backend() {
+                    // State-based link: always hand over, the link task coalesces and retries.
+                    Some(Backend::Esb) => rf::push_hid(&out.hid),
+                    Some(Backend::Ble) if ble_ctrl.is_wireless_connected() => {
+                        let _ = BLE_HID_TX.try_send(out.hid);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Persist link settings changes (transport, backend switch, pairing).
+        if let Some((s, reboot)) = wireless::take_pending_write() {
+            if !flash.write_link_settings(&s) {
+                defmt::warn!("failed to store link settings");
+            }
+            if reboot {
+                info!("rebooting to apply wireless settings");
+                Timer::after_millis(20).await;
+                cortex_m::peripheral::SCB::sys_reset();
             }
         }
 

@@ -89,7 +89,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build ${{ matrix.keyboard }}
+      - name: Build ${{ matrix.name }}
         env:
           LIBHMK_KEYBOARD: ${{ matrix.keyboard }}
         run: |
@@ -99,16 +99,19 @@ jobs:
           mkdir -p dist
           cp "$ELF" dist/firmware.elf
           "$OBJCOPY" -O binary "$ELF" dist/firmware.bin
+          "$OBJCOPY" -O ihex "$ELF" dist/firmware.hex
 
       - name: Archive Firmware Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: firmware-${{ matrix.keyboard }}
+          name: firmware-${{ matrix.name }}
           path: |
             dist/firmware.bin
             dist/firmware.elf
+            dist/firmware.hex
 
-      - name: Build ${{ matrix.keyboard }} with scan-probe instrumentation
+      - name: Build ${{ matrix.name }} with scan-probe instrumentation
+        if: ${{ matrix.probe }}
         env:
           LIBHMK_KEYBOARD: ${{ matrix.keyboard }}
           LIBHMK_PROBE_SCAN_PIN: ${{ matrix.crate == 'libhmk-nrf52840' && 'P0.26' || 'B5' }}

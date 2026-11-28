@@ -3,6 +3,7 @@
 use embassy_nrf::nvmc::Nvmc;
 use embedded_storage::nor_flash::NorFlash;
 use libhmk_core::traits::FlashStorage;
+use libhmk_link::LinkSettings;
 
 use crate::kb;
 
@@ -13,6 +14,20 @@ pub struct NrfFlash<'d> {
 impl<'d> NrfFlash<'d> {
     pub fn new(nvmc: Nvmc<'d>) -> Self {
         Self { nvmc }
+    }
+
+    /// Wireless link settings from their dedicated page (below the wear-leveling area).
+    pub fn read_link_settings(&self) -> Option<LinkSettings> {
+        let mut buf = [0u8; LinkSettings::SIZE];
+        let src = (kb::FLASH_BASE + kb::LINK_SETTINGS_ADDR) as *const u8;
+        unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
+        LinkSettings::decode(&buf)
+    }
+
+    pub fn write_link_settings(&mut self, settings: &LinkSettings) -> bool {
+        let start = kb::LINK_SETTINGS_ADDR;
+        self.nvmc.erase(start, start + kb::FLASH_SECTOR_SIZE).is_ok()
+            && self.nvmc.write(start, &settings.encode()).is_ok()
     }
 }
 

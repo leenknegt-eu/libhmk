@@ -9,7 +9,7 @@ use crate::hid::{HidState, PendingHidReports};
 use crate::keycodes::*;
 use crate::keymask::KeyMask;
 use crate::matrix::Matrix;
-use crate::traits::{BleControl, BleTransportMode, BoardControl, FlashStorage};
+use crate::traits::{BleControl, BleTransportMode, BoardControl, FlashStorage, WirelessBackend};
 use crate::types::{AdvancedKeyType, GamepadButton};
 use crate::xinput::XInputState;
 
@@ -463,7 +463,14 @@ impl<
                 SP_BOOT => board.enter_bootloader(),
                 SP_BT_TOGGLE => ble.toggle_transport(),
                 SP_BT_USB => ble.set_transport_mode(BleTransportMode::Usb),
-                SP_BT_BLE => ble.set_transport_mode(BleTransportMode::Ble),
+                SP_BT_BLE => {
+                    ble.set_transport_mode(BleTransportMode::Wireless);
+                    ble.select_wireless_backend(WirelessBackend::Ble);
+                }
+                SP_BT_24G => {
+                    ble.set_transport_mode(BleTransportMode::Wireless);
+                    ble.select_wireless_backend(WirelessBackend::Esb);
+                }
                 SP_BT_PAIR => ble.start_advertising(true),
                 _ => {}
             }

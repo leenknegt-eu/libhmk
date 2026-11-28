@@ -31,11 +31,25 @@ fn main() {
     )
     .expect("Failed to write keyboard_gen.rs");
 
+    // One flash page below the wear-leveling area holds the wireless link settings.
+    const LINK_SETTINGS_PAGE: u32 = 4096;
+    let link_addr = cfg
+        .reserved_below_wl(LINK_SETTINGS_PAGE)
+        .expect("No room for the link settings page");
     fs::write(
         out_dir.join("memory.x"),
-        cfg.generate_memory_x().expect("Failed to generate memory.x"),
+        cfg.generate_memory_x_reserving(LINK_SETTINGS_PAGE)
+            .expect("Failed to generate memory.x"),
     )
     .expect("Failed to write memory.x");
+    fs::write(
+        out_dir.join("link_gen.rs"),
+        format!(
+            "/// Flash offset of the wireless link settings page.\n\
+             pub const LINK_SETTINGS_ADDR: u32 = 0x{link_addr:08X};\n"
+        ),
+    )
+    .expect("Failed to write link_gen.rs");
 
     // SAADC / multiplexer peripheral bindings generated from keyboard.json
     let pins = cfg.adc_pins().expect("Invalid analog pin configuration");

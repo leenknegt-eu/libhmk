@@ -10,7 +10,8 @@ A pure-Rust `#![no_std]` Hall-effect keyboard firmware workspace built on **Emba
 - **6KRO + NKRO HID**: Composite Boot Keyboard + NKRO, System Control, Consumer Control, Mouse, and 64-byte Raw HID (`hmkconf`) interfaces.
 - **XInput Gamepad**: 4-point analog curve, circular/square joystick scaling, and snappy opposite-axis handling.
 - **Wear-Leveled Flash Storage**: Virtual EEPROM with write-log replay and CRC32 consolidation, binary-compatible with `eeconfig` v0x0105.
-- **Bluetooth Low Energy (nRF52840)**: Pure-Rust [`trouble-host`](https://github.com/embassy-rs/trouble) + Nordic SoftDevice Controller (`nrf-sdc`) linked directly into a single binary — no separate S140 hex blob required! Includes HOGP (Keyboard/System/Consumer/Mouse), Raw HID over BLE (`hmkconf`), Battery Service (`0x180F`), Device Information (`0x180A`), dual-mode USB/BLE switching (`BT_TOGG`, `BT_USB`, `BT_BLE`, `BT_PAIR`), and Active/Idle/Sleep scan throttling.
+- **2.4 GHz wireless (nRF52840, primary)**: Nordic Enhanced ShockBurst link to an nRF52840 USB Dongle (PCA10059) running `libhmk-nrf52840-dongle`, with ≈1 kHz reports instead of BLE's ≤133 Hz. Runtime pairing, raw HID (`hmkconf`) relayed through the dongle, and a stuck-key failsafe. See [`docs/wireless.md`](docs/wireless.md).
+- **Bluetooth Low Energy (nRF52840, optional)**: Pure-Rust [`trouble-host`](https://github.com/embassy-rs/trouble) + Nordic SoftDevice Controller (`nrf-sdc`) linked directly into a single binary — no separate S140 hex blob required! Includes HOGP (Keyboard/System/Consumer/Mouse), Raw HID over BLE (`hmkconf`), Battery Service (`0x180F`), Device Information (`0x180A`), dual-mode USB/BLE switching (`BT_TOGG`, `BT_USB`, `BT_BLE`, `BT_PAIR`), and Active/Idle/Sleep scan throttling.
 
 ## Workspace Layout
 
@@ -18,7 +19,10 @@ A pure-Rust `#![no_std]` Hall-effect keyboard firmware workspace built on **Emba
 | --- | --- | --- |
 | [`crates/libhmk-core`](crates/libhmk-core) | `#![no_std]` (host-testable) | Platform-agnostic firmware engine: matrix, Rapid Trigger, advanced keys, layout, wear leveling, `eeconfig`, HID, XInput, and `hmkconf` Raw HID command protocol |
 | [`crates/libhmk-config`](crates/libhmk-config) | Host (`build.rs`) | Validates `keyboards/*/keyboard.json`, compresses `hmkconf` metadata, and generates `keyboard_gen.rs` + `memory.x` |
-| [`crates/libhmk-nrf52840`](crates/libhmk-nrf52840) | `thumbv7em-none-eabihf` | Nordic nRF52840 firmware (`embassy-nrf`, `embassy-usb`, `trouble-host`, `nrf-sdc`) |
+| [`crates/libhmk-nrf52840`](crates/libhmk-nrf52840) | `thumbv7em-none-eabihf` | Nordic nRF52840 firmware: USB, 2.4 GHz dongle link, optional BLE (`embassy-nrf`, `embassy-usb`, `trouble-host`, `nrf-sdc`) |
+| [`crates/libhmk-nrf52840-dongle`](crates/libhmk-nrf52840-dongle) | `thumbv7em-none-eabihf` | 2.4 GHz USB receiver for the nRF52840 Dongle (PCA10059) |
+| [`crates/libhmk-link`](crates/libhmk-link) | `#![no_std]` (host-testable) | Keyboard ↔ dongle protocol: framing, pairing, link settings, scheduling |
+| [`crates/libhmk-nrf-esb`](crates/libhmk-nrf-esb) | `thumbv7em-none-eabihf` | Interrupt-driven Enhanced ShockBurst PTX/PRX radio driver |
 | [`crates/libhmk-stm32f446`](crates/libhmk-stm32f446) | `thumbv7em-none-eabihf` | STM32F446xx firmware (`embassy-stm32`, `embassy-usb`) |
 | [`crates/libhmk-at32f405`](crates/libhmk-at32f405) | `thumbv7em-none-eabihf` | Artery AT32F405xx firmware (`at32f4xx-pac`, Embassy executor + TMR2 time driver, `embassy-usb-synopsys-otg` on OTGFS1/OTGHS) |
 
@@ -66,6 +70,12 @@ LIBHMK_KEYBOARD=he60 cargo build -p libhmk-stm32f446 --target thumbv7em-none-eab
 # Artery AT32F405xx (e.g. he16)
 LIBHMK_KEYBOARD=he16 cargo build -p libhmk-at32f405 --target thumbv7em-none-eabihf --release
 ```
+
+### Build the 2.4 GHz dongle for a keyboard
+```bash
+LIBHMK_KEYBOARD=nrf52840-dk-he16 cargo build -p libhmk-nrf52840-dongle --target thumbv7em-none-eabihf --release
+```
+See [`docs/wireless.md`](docs/wireless.md) for pairing and flashing the dongle over its USB bootloader.
 
 ### Flash to nRF52840 DK via `probe-rs`
 Because `nrf-sdc` links Nordic's SoftDevice Controller directly into the ELF binary, no separate SoftDevice `.hex` flashing step is needed:
